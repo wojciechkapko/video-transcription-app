@@ -506,6 +506,7 @@ els.installGpuBtn.addEventListener("click", async () => {
   setProgress(PHASE.start, "Resolving packages…");
   setDevicePill("busy", "Installing GPU…");
 
+  let lastWheel = null;
   installUnlisten = await listen("cuda-install-progress", (e) => {
     const ev = e.payload;
     if (ev.event === "cuda_install_progress") {
@@ -515,7 +516,10 @@ els.installGpuBtn.addEventListener("click", async () => {
           PHASE.start + frac * 88,
           `Downloading ${ev.wheel} · ${(ev.bytes / 1e6).toFixed(0)} / ${(ev.total / 1e6).toFixed(0)} MB`,
         );
-        logLine(`Downloading ${ev.wheel}…`);
+        if (ev.wheel !== lastWheel) {
+          lastWheel = ev.wheel;
+          logLine(`Downloading ${ev.wheel}…`);
+        }
       } else if (ev.stage === "extract") {
         setProgress(92, `Installing ${ev.wheel}…`);
       } else if (ev.stage === "resolve") {

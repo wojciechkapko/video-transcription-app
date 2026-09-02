@@ -113,6 +113,16 @@ async fn transcribe(
     let run2 = run.inner().clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        // Fresh run: clear any stale cancel flag from a previous run *before*
+        // we spawn, so the registration below never overwrites a Cancel that
+        // arrives while spawn is still in flight.
+        {
+            let mut r = run2.lock().unwrap();
+            r.cancelled = false;
+            r.pid = None;
+            r.output = None;
+        }
+
         // Optional device override ("cpu" | "cuda"); passed to the worker via
         // the TRANSCRIBE_DEVICE env var it already honors. Empty/"auto" means
         // probe.
@@ -138,11 +148,17 @@ async fn transcribe(
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
 
-        {
+        // Register the running child. If a Cancel raced in before registration
+        // completed, cancel_transcribe already set the flag but had no PID — so
+        // kill the child ourselves here rather than dropping the cancel.
+        let kill_now = {
             let mut r = run2.lock().unwrap();
             r.pid = Some(child.id());
             r.output = Some(output_prefix);
-            r.cancelled = false;
+            r.cancelled
+        };
+        if kill_now {
+            let _ = child.kill();
         }
 
         // Drain stderr concurrently so a chatty traceback can't fill the pipe
@@ -331,7 +347,10 @@ async fn install_cuda(
 
         if !status.success() {
             let tail = last_lines(stderr_text.trim(), 25);
-            let base = format!("CUDA install failed (exit code {:?})", status.code());
+            let base = match status.code() {
+                Some(c) => format!("CUDA install failed (exit code {c})"),
+                None => "CUDA install failed (killed by signal)".to_string(),
+            };
             if tail.is_empty() {
                 return Err(base);
             }

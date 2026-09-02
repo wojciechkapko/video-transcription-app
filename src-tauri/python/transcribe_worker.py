@@ -37,12 +37,14 @@ def _bootstrap_cuda():
     """Register every nvidia/*/bin dir on the DLL search path and eagerly load
     the CUDA runtime families, so pip-installed CUDA/cuDNN resolves at import.
     Returns (resolved, missing) family names."""
+    # Families ctranslate2 actually loads. `nvrtc` is deliberately omitted (it's
+    # only for CUDA JIT compilation, not inference) — listing it would leave a
+    # permanently-"missing" warning after every GPU install.
     families = {
         "cublas": "cublas64_*.dll",
         "cublasLt": "cublasLt64_*.dll",
         "cudnn": "cudnn64_*.dll",
         "cudart": "cudart64_*.dll",
-        "nvrtc": "nvrtc64_*.dll",
     }
 
     for base in _nvidia_roots():
@@ -362,6 +364,7 @@ def _sha256(path):
 def _download_wheel(name, version, url, sha, dest_dir, progress):
     import httpx
     dest = os.path.join(dest_dir, f"{name}-{version}.whl")
+    last = 0.0
     with httpx.stream("GET", url, follow_redirects=True,
                       timeout=httpx.Timeout(30.0, read=120.0)) as resp:
         resp.raise_for_status()
@@ -371,7 +374,12 @@ def _download_wheel(name, version, url, sha, dest_dir, progress):
             for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
                 f.write(chunk)
                 done += len(chunk)
-                progress(name, done, total)
+                now = time.time()
+                if now - last >= 0.25:  # throttle: ~4 events/sec, not ~1/1 MB
+                    last = now
+                    progress(name, done, total)
+    if total:  # final update so the bar reaches the full total
+        progress(name, done, total)
     if sha and _sha256(dest) != sha:
         os.remove(dest)
         raise RuntimeError(f"checksum mismatch for {name}-{version}")
