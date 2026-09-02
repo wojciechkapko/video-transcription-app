@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transcribe · local Whisper</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+  <body>
+    <main class="container">
+      <header class="topbar" data-tauri-drag-region>
+        <div class="brand">
+          <div class="logo">🎙️</div>
+          <div class="brand-text">
+            <h1>Transcribe</h1>
+            <p class="subtitle">Whisper large-v3 · runs entirely on this machine</p>
+          </div>
+        </div>
+        <div class="device-pill" id="device-pill" data-state="idle">
+          <span class="dot"></span>
+          <span id="device-pill-text">Idle</span>
+        </div>
+      </header>
+
+      <!-- Drop zone -->
+      <section id="dropzone" class="dropzone">
+        <div class="dz-inner">
+          <div class="dz-icon" id="dz-icon">📼</div>
+          <p class="dz-title" id="dz-title">Drop a video or audio file here</p>
+          <p class="dz-hint">MP4, MKV, MOV, WebM, MP3, WAV… &nbsp;·&nbsp; or <span class="link" id="browse-btn">browse files</span></p>
+          <p class="dz-file" id="dz-file"></p>
+          <div class="dz-ready" id="dz-ready">
+            <span class="dz-ready-name" id="dz-ready-name"></span>
+            <button class="link dz-change" id="change-file">choose another</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Options -->
+      <section class="options" id="options">
+        <label for="lang-select">Language</label>
+        <select id="lang-select">
+          <option value="auto">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="pl">Polish</option>
+          <option value="de">German</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="it">Italian</option>
+          <option value="nl">Dutch</option>
+          <option value="pt">Portuguese</option>
+        </select>
+        <button id="transcribe-btn" disabled>Transcribe</button>
+      </section>
+
+      <!-- Progress -->
+      <section id="progress" class="progress hidden">
+        <div class="progress-head">
+          <span class="progress-title" id="progress-title">Transcribing…</span>
+          <span class="progress-pct" id="progress-pct">0%</span>
+        </div>
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+        <div class="progress-stats" id="progress-stats">
+          <div class="stat"><span class="stat-label">Elapsed</span><span class="stat-value" id="stat-elapsed">0:00</span></div>
+          <div class="stat"><span class="stat-label">Remaining</span><span class="stat-value" id="stat-eta">—</span></div>
+          <div class="stat"><span class="stat-label">Segments</span><span class="stat-value" id="stat-segments">0</span></div>
+          <div class="stat"><span class="stat-label">Device</span><span class="stat-value" id="stat-device">—</span></div>
+        </div>
+        <div class="progress-status" id="progress-status"></div>
+        <ul id="progress-log" class="progress-log hidden"></ul>
+      </section>
+
+      <!-- Results -->
+      <section id="results" class="results hidden">
+        <div class="results-header">
+          <div class="results-title">
+            <h2>Transcript</h2>
+            <span class="results-file" id="results-file"></span>
+          </div>
+          <div class="result-actions">
+            <button id="copy-active" class="btn-ghost">Copy current</button>
+            <button id="open-folder" class="btn-ghost">Open folder</button>
+          </div>
+        </div>
+
+        <div class="stats-strip" id="stats-strip"></div>
+
+        <div class="tabs">
+          <button class="tab active" data-tab="txt">Plain text</button>
+          <button class="tab" data-tab="srt">SubRip (.srt)</button>
+          <button class="tab" data-tab="vtt">WebVTT (.vtt)</button>
+        </div>
+
+        <pre id="transcript-view" class="transcript-view" data-mode="txt"></pre>
+      </section>
+
+      <footer class="footer">
+        <span>large-v3 · GPU→CPU auto · beam 8 · word timestamps · nothing leaves this machine</span>
+      </footer>
+    </main>
+
+    <!-- Toast -->
+    <div id="toast" class="toast" role="status"></div>
+  </body>
+</html>

@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+"""Generalized transcription worker for the Tauri app.
+Usage: transcribe_worker.py <input_video> <output_prefix> [language]
+Prints JSON progress lines to stdout; final line is a JSON summary.
+
+On error: a JSON {"event":"error"} line on stdout, a traceback on stderr,
+and a non-zero exit code.
+"""
+import os, time, glob, ctypes, site, sys, json, traceback
+
+# ---- CUDA DLL bootstrap (Windows) ----
+def _bootstrap_cuda():
+    """Register every installed nvidia wheel's bin/ dir on the DLL search path
+    and eagerly load the CUDA runtime families, so pip-installed CUDA/cuDNN
+    doesn't fail at import. Returns (resolved, missing) family names."""
+    _sp = None
+    for p in site.getsitepackages():
+        if p.endswith("site-packages"):
+            _sp = p
+            break
+    if _sp is None:
+        _sp = os.path.join(sys.prefix, "Lib", "site-packages")
+    base = os.path.join(_sp, "nvidia")
+
+    for dll_dir in glob.glob(os.path.join(base, "*", "bin")):
+        try:
+            os.add_dll_directory(dll_dir)
+            os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
+        except Exception as exc:
+            print(json.dumps({"event": "cuda_bootstrap", "path": dll_dir, "error": str(exc)}), flush=True)
+
+    # Match by family prefix, not exact SONAME: NVIDIA wheels bump the trailing
+    # digit on upgrade (cudnn64_9 -> cudnn64_10), so hardcoding the version
+    # silently breaks the probe while the DLLs are actually present.
+    families = {
+        "cublas": "cublas64_*.dll",
+        "cublasLt": "cublasLt64_*.dll",
+        "cudnn": "cudnn64_*.dll",
+        "cudart": "cudart64_*.dll",
+        "nvrtc": "nvrtc64_*.dll",
+    }
+    resolved, missing = [], []
+    for fam, pattern in families.items():
+        loaded = False
+        for path in glob.glob(os.path.join(base, "*", "bin", pattern)):
+            try:
+                ctypes.WinDLL(path)
+                loaded = True
+                break
+            except Exception:
+                continue
+        (resolved if loaded else missing).append(fam)
+
+    # Surface only a *partial* CUDA install (some families present, others
+    # missing) — that's a real breakage worth surfacing. A fully-absent
+    # nvidia/ dir means a clean CPU-only machine, and choose_device() already
+    # falls back to CPU silently; don't raise a scary false alarm there. The
+    # explicit-cuda case is surfaced even when nothing resolved, so a user who
+    # forced CUDA sees *why* it can't be used.
+    explicit_cuda = os.environ.get("TRANSCRIBE_DEVICE", "").strip().lower() == "cuda"
+    if missing and (resolved or explicit_cuda):
+        print(json.dumps({"event": "cuda_bootstrap",
+                          "resolved": resolved, "missing": missing}), flush=True)
+    return resolved, missing
+
+
+if os.name == "nt":
+    _bootstrap_cuda()
+
+
+def emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+def choose_device():
+    """Probe for CUDA and fall back to CPU; explicit override wins."""
+    explicit = os.environ.get("TRANSCRIBE_DEVICE", "").strip().lower()
+    if explicit:
+        return explicit
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def ts(s, sep):
+    """Format seconds as HH:MM:SS,mmm with the given millisecond separator."""
+    total_ms = int(round(s * 1000))
+    h = total_ms // 3600000
+    m = (total_ms // 60000) % 60
+    sec = (total_ms // 1000) % 60
+    ms = total_ms % 1000
+    return f"{h:02d}:{m:02d}:{sec:02d}{sep}{ms:03d}"
+
+
+def ts_srt(s):
+    return ts(s, ",")
+
+
+def ts_vtt(s):
+    return ts(s, ".")
+
+
+def _main():
+    # Imports live inside the guarded call graph so an import failure lands in
+    # main()'s structured JSON error path, not a bare traceback.
+    from faster_whisper import WhisperModel
+
+    src = sys.argv[1]
+    out_prefix = sys.argv[2]
+    language = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] not in ("", "auto") else None
+
+    device = choose_device()
+    compute_type = os.environ.get("TRANSCRIBE_COMPUTE_TYPE", "").strip() or (
+        "int8_float16" if device == "cuda" else "int8"
+    )
+
+    emit({"event": "loading_model", "device": device, "compute_type": compute_type})
+    model = WhisperModel("large-v3", device=device, compute_type=compute_type)
+
+    emit({"event": "transcribing", "file": os.path.basename(src), "device": device})
+    t0 = time.time()
+    segments, info = model.transcribe(
+        src,
+        language=language,
+        beam_size=8,
+        word_timestamps=True,
+        # Silence is skipped rather than fed to the decoder, so there's no dead
+        # air to hallucinate on (and it's faster on quiet stretches).
+        vad_filter=True,
+        # Critical: stop conditioning each token on already-emitted text while
+        # decoding greedily — the fixed-point loop behind runaway repetition
+        # (e.g. "Yeah Yeah Yeah…"). `no_repeat_ngram_size` + `repetition_penalty`
+        # hard-stop any residual n-gram looping.
+        condition_on_previous_text=False,
+        no_repeat_ngram_size=3,
+        repetition_penalty=1.2,
+        temperature=0.0,
+    )
+    media_duration = info.duration
+    emit({"event": "detected_language", "language": info.language,
+          "probability": round(info.language_probability, 3),
+          "duration_s": media_duration})
+
+    total_chars = 0
+    n = 0
+    last_end = 0.0
+    # Write to *.part temp files and atomically rename only after full success,
+    # so a crash mid-transcribe never leaves truncated files that look complete.
+    tmp = {ext: f"{out_prefix}.{ext}.part" for ext in ("txt", "srt", "vtt")}
+    with open(tmp["txt"], "w", encoding="utf-8") as f_txt, \
+         open(tmp["srt"], "w", encoding="utf-8") as f_srt, \
+         open(tmp["vtt"], "w", encoding="utf-8") as f_vtt:
+        f_vtt.write("WEBVTT\n\n")
+        for i, seg in enumerate(segments, 1):
+            line = seg.text.strip()
+            n += 1
+            total_chars += len(line)
+            last_end = seg.end
+            f_txt.write(line + "\n")
+            f_srt.write(f"{i}\n{ts_srt(seg.start)} --> {ts_srt(seg.end)}\n{line}\n\n")
+            f_vtt.write(f"{ts_vtt(seg.start)} --> {ts_vtt(seg.end)}\n{line}\n\n")
+            if n % 25 == 0:
+                for f in (f_txt, f_srt, f_vtt):
+                    f.flush()
+                # media_s is the media timestamp of the latest segment, so the
+                # frontend can compute an honest "audio processed" fraction.
+                emit({"event": "progress", "segments": n,
+                      "elapsed_s": round(time.time() - t0, 1),
+                      "media_s": round(last_end, 1),
+                      "duration_s": media_duration})
+
+    for ext in ("txt", "srt", "vtt"):
+        os.replace(tmp[ext], f"{out_prefix}.{ext}")
+
+    duration = media_duration if media_duration else last_end
+    emit({"event": "done", "segments": n, "language": info.language,
+          "duration_s": round(duration or 0, 1),
+          "elapsed_s": round(time.time() - t0, 1),
+          "chars": total_chars,
+          "txt": out_prefix + ".txt",
+          "srt": out_prefix + ".srt",
+          "vtt": out_prefix + ".vtt"})
+
+
+def main():
+    try:
+        _main()
+    except Exception as exc:
+        try:
+            emit({"event": "error", "message": str(exc)})
+        except Exception:
+            print(str(exc), flush=True)
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
