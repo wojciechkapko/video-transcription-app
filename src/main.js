@@ -226,13 +226,22 @@ els.transcribeBtn.addEventListener("click", async () => {
               els.statDevice.textContent = deviceLabel(currentDevice);
               setProgress(8, "Downloading model (one-time ~3 GB)…");
               setDevicePill(currentDevice === "cuda" ? "gpu" : "cpu", `Downloading · ${deviceLabel(currentDevice)}`);
-              logLine("Downloading Whisper large-v3 model (~3 GB, first run only)…");
+              logLine("Downloading Whisper large-v3 model…");
               break;
+            case "download_progress": {
+              if (ev.total > 0) {
+                const frac = Math.min(0.9, ev.bytes / ev.total);
+                const done = (ev.bytes / 1e9).toFixed(2);
+                const total = (ev.total / 1e9).toFixed(2);
+                setProgress(8 + frac * 82, `Downloading model · ${done} / ${total} GB`);
+              }
+              break;
+            }
             case "loading_model":
               currentDevice = ev.device || null;
               els.progressTitle.textContent = "Loading model";
               els.statDevice.textContent = deviceLabel(currentDevice);
-              setProgress(10, `Loading Whisper large-v3 model…`);
+              setProgress(95, `Loading Whisper large-v3 model…`);
               setDevicePill(currentDevice === "cuda" ? "gpu" : "cpu", `Loading · ${deviceLabel(currentDevice)}`);
               logLine(`Loading model… (device: ${ev.device || "auto"})`);
               break;

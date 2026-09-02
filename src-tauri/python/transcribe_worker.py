@@ -114,8 +114,24 @@ def ts_vtt(s):
     return ts(s, ".")
 
 
-def _model_cached():
-    """True if the large-v3 snapshot is already in the HF hub cache."""
+MODEL_REPO = "Systran/faster-whisper-large-v3"
+# Files faster-whisper needs (CTranslate2 format); model.bin dominates (~3 GB).
+MODEL_FILES = ["config.json", "preprocessor_config.json", "model.bin",
+               "tokenizer.json", "vocabulary.json"]
+
+
+def _model_dir():
+    """Dedicated directory we download the model into when it isn't cached."""
+    return os.environ.get("WHISPER_MODEL_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "whisper-transcribe", "large-v3")
+
+
+def _model_ready(d):
+    return os.path.isfile(os.path.join(d, "model.bin"))
+
+
+def _model_cached_in_hf_hub():
+    """True if large-v3 is already in the default HuggingFace cache."""
     try:
         root = os.environ.get("HF_HOME") or os.path.join(
             os.path.expanduser("~"), ".cache", "huggingface", "hub")
@@ -125,11 +141,92 @@ def _model_cached():
         return False
 
 
-def _main():
-    # Imports live inside the guarded call graph so an import failure lands in
-    # main()'s structured JSON error path, not a bare traceback.
+class _JsonBar:
+    """Minimal tqdm-compatible sink relaying download bytes as JSON on stdout.
+
+    `huggingface_hub.hf_hub_download(tqdm_class=_JsonBar)` instantiates one of
+    these per file (with `total` = file size) and drives it through either the
+    plain-HTTP loop (`.update(n)`) or the Xet path (`.update(n)`,
+    `.set_postfix_str(...)`, and reads/mutates `.n`/`.total`). We implement just
+    enough of tqdm's surface for both. Tiny metadata files (total < 1 MB) are
+    skipped so only the ~3 GB model.bin drives the progress bar.
+    """
+
+    def __init__(self, **kwargs):
+        self.total = int(kwargs.get("total") or 0)
+        self.desc = str(kwargs.get("desc", ""))
+        self.n = int(kwargs.get("initial") or 0)
+        self._last_emit = -1
+
+    def update(self, n=1):
+        self.n += int(n)
+        # Throttle: emit at most ~every 0.25 s (chunks arrive faster than that).
+        now = time.monotonic()
+        if self.total >= 1_000_000 and now - self._last_emit >= 0.25:
+            self._last_emit = now
+            emit({"event": "download_progress", "file": self.desc,
+                  "bytes": self.n, "total": self.total})
+
+    # ---- no-op tqdm surface used by huggingface_hub's Xet reporter ----
+    def refresh(self, **kwargs):
+        pass
+
+    def close(self):
+        pass
+
+    def set_postfix_str(self, postfix, refresh=False):
+        pass
+
+    def set_transfer_postfix_str(self, postfix, refresh=False):
+        pass
+
+    def set_postfix(self, *args, **kwargs):
+        pass
+
+    def set_description(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _load_model(device, compute_type):
+    """Return a loaded WhisperModel, downloading large-v3 (with live progress)
+    only when it isn't already anywhere on disk."""
     from faster_whisper import WhisperModel
 
+    loading = {"event": "loading_model", "device": device, "compute_type": compute_type}
+
+    # 1) Already in our dedicated download dir.
+    model_dir = _model_dir()
+    if _model_ready(model_dir):
+        emit(loading)
+        return WhisperModel(model_dir, device=device, compute_type=compute_type)
+
+    # 2) Already in the default HuggingFace cache (fast path, no download).
+    if _model_cached_in_hf_hub():
+        emit(loading)
+        return WhisperModel("large-v3", device=device, compute_type=compute_type)
+
+    # 3) Nothing on disk: download with progress, then load from the local dir.
+    emit({"event": "downloading_model", "device": device,
+          "note": "first run: downloading ~3 GB Whisper large-v3 model"})
+    try:
+        from huggingface_hub import hf_hub_download
+        os.makedirs(model_dir, exist_ok=True)
+        for name in MODEL_FILES:
+            hf_hub_download(MODEL_REPO, name, local_dir=model_dir, tqdm_class=_JsonBar)
+    except Exception as e:
+        raise RuntimeError(f"model download failed: {e}") from e
+
+    emit(loading)
+    return WhisperModel(model_dir, device=device, compute_type=compute_type)
+
+
+def _main():
     src = sys.argv[1]
     out_prefix = sys.argv[2]
     language = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] not in ("", "auto") else None
@@ -139,12 +236,7 @@ def _main():
         "int8_float16" if device == "cuda" else "int8"
     )
 
-    if _model_cached():
-        emit({"event": "loading_model", "device": device, "compute_type": compute_type})
-    else:
-        emit({"event": "downloading_model", "device": device,
-              "note": "first run: downloading ~3 GB Whisper large-v3 model"})
-    model = WhisperModel("large-v3", device=device, compute_type=compute_type)
+    model = _load_model(device, compute_type)
 
     emit({"event": "transcribing", "file": os.path.basename(src), "device": device})
     t0 = time.time()
