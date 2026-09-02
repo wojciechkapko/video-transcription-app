@@ -385,18 +385,41 @@ els.openFolder.addEventListener("click", async () => {
   if (outputPaths.txt) await invoke("open_in_folder", { path: outputPaths.txt });
 });
 
-/* ---------- device option gating ---------- */
+/* ---------- settings persistence + device option gating ---------- */
+async function saveSettings() {
+  try {
+    await invoke("set_settings", {
+      settings: { device: els.deviceSelect.value, language: els.langSelect.value },
+    });
+  } catch {
+    /* non-fatal */
+  }
+}
+els.deviceSelect.addEventListener("change", saveSettings);
+els.langSelect.addEventListener("change", saveSettings);
+
 async function initDeviceOptions() {
   const gpuOption = els.deviceSelect.querySelector('option[value="cuda"]');
-  if (!gpuOption) return;
+  let cuda = false;
   try {
-    const cuda = await invoke("check_gpu");
-    if (!cuda) {
-      gpuOption.disabled = true;
-      gpuOption.textContent = "GPU (CUDA — not available)";
-    }
+    cuda = await invoke("check_gpu");
   } catch {
     // Probe failed: leave "GPU" selectable; Auto still falls back to CPU safely.
+  }
+  if (!cuda && gpuOption) {
+    gpuOption.disabled = true;
+    gpuOption.textContent = "GPU (CUDA — not available)";
+  }
+
+  // Restore last-selected device + language (defaults to "auto" on first run).
+  try {
+    const s = await invoke("get_settings");
+    let d = s.device || "auto";
+    if (d === "cuda" && !cuda) d = "auto"; // saved GPU but now unavailable
+    els.deviceSelect.value = d;
+    if (s.language) els.langSelect.value = s.language;
+  } catch {
+    /* non-fatal */
   }
 }
 initDeviceOptions();

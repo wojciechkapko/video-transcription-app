@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -239,6 +239,56 @@ fn open_in_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    #[serde(default = "default_auto")]
+    device: String,
+    #[serde(default = "default_auto")]
+    language: String,
+}
+
+fn default_auto() -> String {
+    "auto".to_string()
+}
+
+fn settings_path() -> Option<PathBuf> {
+    let base = std::env::var("LOCALAPPDATA")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".config"))
+        });
+    base.map(|b| b.join("whisper-transcribe").join("settings.json"))
+}
+
+#[tauri::command]
+fn get_settings() -> Settings {
+    if let Some(path) = settings_path() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(settings) = serde_json::from_str::<Settings>(&raw) {
+                return settings;
+            }
+        }
+    }
+    Settings {
+        device: "auto".to_string(),
+        language: "auto".to_string(),
+    }
+}
+
+#[tauri::command]
+fn set_settings(settings: Settings) -> Result<(), String> {
+    let path = settings_path().ok_or("no writable settings location")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -283,6 +333,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             transcribe,
             check_gpu,
+            get_settings,
+            set_settings,
             read_transcript,
             open_in_folder
         ])
