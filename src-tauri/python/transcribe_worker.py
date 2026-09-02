@@ -339,7 +339,14 @@ def _resolve_wheel(name, version):
     data = resp.json()
     for f in data.get("urls", []):
         if f.get("packagetype") == "bdist_wheel" and "win_amd64" in f.get("filename", ""):
-            return f["url"], (f.get("digests") or {}).get("sha256")
+            sha = (f.get("digests") or {}).get("sha256")
+            if not sha:
+                # A missing digest must be a hard failure on a verify-before-
+                # extract path, not a silent skip of verification.
+                raise RuntimeError(
+                    f"PyPI returned no sha256 digest for {name}=={version}; "
+                    "refusing to download an unverifiable wheel")
+            return f["url"], sha
     raise RuntimeError(f"no win_amd64 wheel for {name}=={version}")
 
 
@@ -355,7 +362,8 @@ def _sha256(path):
 def _download_wheel(name, version, url, sha, dest_dir, progress):
     import httpx
     dest = os.path.join(dest_dir, f"{name}-{version}.whl")
-    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as resp:
+    with httpx.stream("GET", url, follow_redirects=True,
+                      timeout=httpx.Timeout(30.0, read=120.0)) as resp:
         resp.raise_for_status()
         total = int(resp.headers.get("content-length") or 0)
         done = 0
@@ -372,8 +380,18 @@ def _download_wheel(name, version, url, sha, dest_dir, progress):
 
 def _extract_wheel(wheel_path, dest_dir):
     import zipfile
+    dest = os.path.realpath(dest_dir)
     with zipfile.ZipFile(wheel_path) as z:
-        z.extractall(dest_dir)
+        # Zip-slip guard: reject any member that resolves outside dest_dir
+        # (e.g. a `../../` entry). Wheels are sha256-verified against PyPI
+        # before we get here, but this keeps a compromised artifact from ever
+        # turning an extract into an arbitrary file write.
+        for member in z.infolist():
+            target = os.path.realpath(os.path.join(dest, member.filename))
+            if target != dest and not target.startswith(dest + os.sep):
+                raise RuntimeError(
+                    f"refusing to extract {member.filename!r}: escapes destination")
+        z.extractall(dest)
     os.remove(wheel_path)
 
 

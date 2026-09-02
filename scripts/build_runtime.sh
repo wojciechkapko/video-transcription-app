@@ -8,8 +8,9 @@
 #
 # Requirements: `curl`, `unzip`, and a `python` on PATH whose minor version
 # MATCHES PY_VER (so the pip-installed wheels' cpXY tags line up with the
-# embeddable interpreter). The bundled runtime is CPU-only on purpose; GPU
-# users point at their own env via PYTHON_TRANSCRIBE.
+# embeddable interpreter). The bundled runtime ships no NVIDIA DLLs — it is
+# CPU-only as built; GPU users either use the in-app "Install GPU" flow
+# (worker --install-cuda) or point at their own env via PYTHON_TRANSCRIBE.
 set -euo pipefail
 
 PY_VER="3.11.9"
