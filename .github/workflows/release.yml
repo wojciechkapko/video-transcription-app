@@ -1,0 +1,69 @@
+name: Release
+
+# Builds the MSI + NSIS installers and publishes them as a GitHub Release.
+# Triggered by pushing a tag like v0.1.0 (or manually via the Actions tab).
+#
+# The bundled Python runtime (src-tauri/runtime/, ~292 MB) is gitignored, so
+# it is regenerated here with scripts/build_runtime.sh before the Tauri build.
+# The release is created with the auto-provisioned GITHUB_TOKEN, which can
+# write to this repo regardless of who is logged into `gh` locally.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write # create the release + upload installer assets
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install frontend deps (Tauri CLI)
+        run: npm ci
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Set up Python 3.11 (build interpreter for the runtime)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build the bundled Python runtime
+        run: bash scripts/build_runtime.sh
+
+      - name: Build installers (MSI + NSIS)
+        run: npm run tauri build -- --bundles msi,nsis
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "src-tauri/target/release/bundle/msi/Video Transcriber_${VERSION}_x64_en-US.msi" \
+            "src-tauri/target/release/bundle/nsis/Video Transcriber_${VERSION}_x64-setup.exe" \
+            --title "Video Transcriber v${VERSION}" \
+            --notes "Local-first Whisper transcription (large-v3). MSI + NSIS installers for Windows 10/11."
