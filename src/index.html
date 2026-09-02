@@ -29,7 +29,6 @@
           <div class="dz-icon" id="dz-icon">📼</div>
           <p class="dz-title" id="dz-title">Drop a video or audio file here</p>
           <p class="dz-hint">MP4, MKV, MOV, WebM, MP3, WAV… &nbsp;·&nbsp; or <span class="link" id="browse-btn">browse files</span></p>
-          <p class="dz-file" id="dz-file"></p>
           <div class="dz-ready" id="dz-ready">
             <span class="dz-ready-name" id="dz-ready-name"></span>
             <button class="link dz-change" id="change-file">choose another</button>
@@ -38,28 +37,32 @@
       </section>
 
       <!-- Options -->
-            <section class="options" id="options">
-              <label for="lang-select">Language</label>
-              <select id="lang-select">
-                <option value="auto">Auto-detect</option>
-                <option value="en">English</option>
-                <option value="pl">Polish</option>
-                <option value="de">German</option>
-                <option value="es">Spanish</option>
-                <option value="fr">French</option>
-                <option value="it">Italian</option>
-                <option value="nl">Dutch</option>
-                <option value="pt">Portuguese</option>
-              </select>
-              <label for="device-select">Device</label>
-                      <select id="device-select">
-                        <option value="auto">Auto (GPU → CPU)</option>
-                        <option value="cpu">CPU</option>
-                        <option value="cuda">GPU (CUDA)</option>
-                      </select>
-                      <span class="link hidden" id="install-gpu-btn">Install GPU support (~1.1 GB)</span>
-                      <button id="transcribe-btn" disabled>Transcribe</button>
-            </section>
+      <section class="options">
+        <label for="lang-select">Language</label>
+        <select id="lang-select">
+          <option value="auto">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="pl">Polish</option>
+          <option value="de">German</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="it">Italian</option>
+          <option value="nl">Dutch</option>
+          <option value="pt">Portuguese</option>
+        </select>
+        <label for="device-select">Device</label>
+        <select id="device-select">
+          <option value="auto">Auto (GPU → CPU)</option>
+          <option value="cpu">CPU</option>
+          <option value="cuda">GPU (CUDA)</option>
+        </select>
+        <button id="transcribe-btn" disabled>Transcribe</button>
+      </section>
+
+      <!-- On-demand GPU install link (only when CUDA is missing) -->
+      <div class="gpu-note hidden" id="gpu-note">
+        <span class="link" id="install-gpu-btn">⚡ Install GPU support (~1.1&nbsp;GB, one-time)</span>
+      </div>
 
       <!-- Progress -->
       <section id="progress" class="progress hidden">

@@ -7,17 +7,28 @@ let currentFile = null;
 let currentFileName = null;
 let outputPaths = { txt: null, srt: null, vtt: null };
 let busy = false;
+let installing = false;
 let mediaDuration = 0; // set from worker events; drives the progress bar
 let currentDevice = null; // "cuda" | "cpu" | null
-let runStart = 0; // performance.now() at transcribe start
 let lastFrac = 0; // last media fraction for ETA
 let activeTab = "txt";
+
+// Progress bar phase anchors. Each phase owns a fixed slice of the 0–100%
+// bar so the fill can never run backwards when (e.g.) "transcribing" follows
+// "loading_model" after a long model download.
+const PHASE = {
+  start: 2,          // run begins
+  download: 2,       // model download window
+  downloadMax: 60,
+  load: 62,          // model loaded into memory (brief)
+  transcribe: 65,    // transcription begins; fills up to ~98%
+  done: 100,
+};
 
 const els = {
   dropzone: $("dropzone"),
   dzIcon: $("dz-icon"),
   dzTitle: $("dz-title"),
-  dzFile: $("dz-file"),
   dzReady: $("dz-ready"),
   dzReadyName: $("dz-ready-name"),
   browseBtn: $("browse-btn"),
@@ -25,6 +36,7 @@ const els = {
   langSelect: $("lang-select"),
   deviceSelect: $("device-select"),
   installGpuBtn: $("install-gpu-btn"),
+  gpuNote: $("gpu-note"),
   transcribeBtn: $("transcribe-btn"),
   progress: $("progress"),
   progressTitle: $("progress-title"),
@@ -105,20 +117,19 @@ function setProgress(pct, status) {
 }
 
 // Fraction of media processed (latest segment timestamp vs. total duration),
-// capped so the bar never looks stuck; 100% is reserved for "done".
+// mapped into the transcription phase band so the bar stays monotonic.
 function progressPct(ev) {
-  const base = 15;
   const mediaS = ev.media_s;
   if (mediaDuration > 0 && mediaS > 0) {
-    const frac = Math.min(0.95, mediaS / mediaDuration);
+    const frac = Math.min(0.98, mediaS / mediaDuration);
     lastFrac = frac;
-    return base + frac * 80;
+    return PHASE.transcribe + frac * (98 - PHASE.transcribe);
   }
-  return base + Math.min(80, (ev.segments / 200) * 80);
+  return PHASE.transcribe + Math.min(33, (ev.segments / 200) * 33);
 }
 
 function updateEta(ev) {
-  if (runStart && ev.elapsed_s > 1 && mediaDuration > 0 && lastFrac > 0.01) {
+  if (ev.elapsed_s > 1 && mediaDuration > 0 && lastFrac > 0.01) {
     const rate = lastFrac / ev.elapsed_s; // fraction per second
     const remain = (1 - lastFrac) / rate;
     els.statEta.textContent = fmtClock(remain);
@@ -136,7 +147,6 @@ function setFile(path) {
   els.dzIcon.textContent = "🎬";
   els.dzTitle.textContent = "Ready to transcribe";
   els.dzReadyName.textContent = currentFileName;
-  els.dzFile.textContent = "";
   els.transcribeBtn.disabled = false;
   // A new file clears the previous run's view.
   els.results.classList.add("hidden");
@@ -147,11 +157,11 @@ function setFile(path) {
 
 listen("tauri://drag-drop", (e) => {
   const paths = e.payload?.paths;
-  if (paths && paths.length > 0 && !busy) setFile(paths[0]);
+  if (paths && paths.length > 0 && !busy && !installing) setFile(paths[0]);
 }).catch(() => {});
 
 listen("tauri://drag-enter", () => {
-  if (!busy) els.dropzone.classList.add("dragover");
+  if (!busy && !installing) els.dropzone.classList.add("dragover");
 }).catch(() => {});
 
 ["tauri://drag-leave", "tauri://drag-drop"].forEach((ev) =>
@@ -161,7 +171,7 @@ listen("tauri://drag-enter", () => {
 /* ---------- browse ---------- */
 
 function pickFile() {
-  if (busy) return;
+  if (busy || installing) return;
   invoke("plugin:dialog|open", {
     options: {
       multiple: false,
@@ -169,24 +179,8 @@ function pickFile() {
         {
           name: "Media",
           extensions: [
-            "mp4",
-            "mkv",
-            "mov",
-            "webm",
-            "avi",
-            "m4v",
-            "mpg",
-            "mpeg",
-            "wmv",
-            "flv",
-            "ts",
-            "mp3",
-            "wav",
-            "flac",
-            "m4a",
-            "aac",
-            "ogg",
-            "wma",
+            "mp4", "mkv", "mov", "webm", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", "ts",
+            "mp3", "wav", "flac", "m4a", "aac", "ogg", "wma",
           ],
         },
       ],
@@ -201,7 +195,7 @@ els.changeFile.addEventListener("click", (e) => {
   pickFile();
 });
 els.dropzone.addEventListener("click", () => {
-  if (!busy) pickFile();
+  if (!busy && !installing) pickFile();
 });
 
 /* ---------- transcribe ---------- */
@@ -215,14 +209,14 @@ els.transcribeBtn.addEventListener("click", async () => {
     cancelTranscription();
     return;
   }
-  if (!currentFile) return;
+  if (installing || !currentFile) return;
   busy = true;
-  runStart = performance.now();
   mediaDuration = 0;
   lastFrac = 0;
   currentDevice = null;
 
   els.transcribeBtn.textContent = "Cancel";
+  els.transcribeBtn.classList.add("cancelling");
   els.langSelect.disabled = true;
   els.deviceSelect.disabled = true;
   els.results.classList.add("hidden");
@@ -234,7 +228,7 @@ els.transcribeBtn.addEventListener("click", async () => {
   els.statSegments.textContent = "0";
   els.statDevice.textContent = "—";
   els.progressTitle.textContent = "Starting…";
-  setProgress(2, "Starting…");
+  setProgress(PHASE.start, "Starting…");
   setDevicePill("busy", "Starting");
 
   const base = currentFile.replace(/\.[^.]+$/, "");
@@ -249,7 +243,7 @@ els.transcribeBtn.addEventListener("click", async () => {
         currentDevice = ev.device || null;
         els.progressTitle.textContent = "Downloading model";
         els.statDevice.textContent = deviceLabel(currentDevice);
-        setProgress(8, "Downloading model (one-time ~3 GB)…");
+        setProgress(PHASE.download, "Downloading model (one-time ~3 GB)…");
         setDevicePill(
           currentDevice === "cuda" ? "gpu" : "cpu",
           `Downloading · ${deviceLabel(currentDevice)}`,
@@ -258,11 +252,11 @@ els.transcribeBtn.addEventListener("click", async () => {
         break;
       case "download_progress": {
         if (ev.total > 0) {
-          const frac = Math.min(0.9, ev.bytes / ev.total);
+          const frac = Math.min(1, ev.bytes / ev.total);
           const done = (ev.bytes / 1e9).toFixed(2);
           const total = (ev.total / 1e9).toFixed(2);
           setProgress(
-            8 + frac * 82,
+            PHASE.download + frac * (PHASE.downloadMax - PHASE.download),
             `Downloading model · ${done} / ${total} GB`,
           );
         }
@@ -272,7 +266,7 @@ els.transcribeBtn.addEventListener("click", async () => {
         currentDevice = ev.device || null;
         els.progressTitle.textContent = "Loading model";
         els.statDevice.textContent = deviceLabel(currentDevice);
-        setProgress(95, `Loading Whisper large-v3 model…`);
+        setProgress(PHASE.load, `Loading Whisper large-v3 model…`);
         setDevicePill(
           currentDevice === "cuda" ? "gpu" : "cpu",
           `Loading · ${deviceLabel(currentDevice)}`,
@@ -281,7 +275,7 @@ els.transcribeBtn.addEventListener("click", async () => {
         break;
       case "transcribing":
         els.progressTitle.textContent = "Transcribing";
-        setProgress(15, `Transcribing…`);
+        setProgress(PHASE.transcribe, `Transcribing…`);
         setDevicePill("busy", `Working · ${deviceLabel(currentDevice)}`);
         logLine("Transcribing…");
         break;
@@ -305,7 +299,7 @@ els.transcribeBtn.addEventListener("click", async () => {
         break;
       case "done": {
         outputPaths = { txt: ev.txt, srt: ev.srt, vtt: ev.vtt };
-        setProgress(100, `Done — ${ev.segments} segments`);
+        setProgress(PHASE.done, `Done — ${ev.segments} segments`);
         els.progressTitle.textContent = "Complete";
         els.statElapsed.textContent = fmtClock(ev.elapsed_s);
         els.statSegments.textContent = String(ev.segments);
@@ -358,6 +352,7 @@ els.transcribeBtn.addEventListener("click", async () => {
     busy = false;
     els.transcribeBtn.disabled = false;
     els.transcribeBtn.textContent = "Transcribe";
+    els.transcribeBtn.classList.remove("cancelling");
     els.langSelect.disabled = false;
     els.deviceSelect.disabled = false;
   }
@@ -386,10 +381,7 @@ function renderStats(ev) {
     )
     .join("");
   els.resultsFile.textContent = currentFileName || "";
-  const clean = currentFileName?.replace(/\.[^.]+$/, "") || "transcript";
   els.copyActive.textContent = `Copy ${activeTab === "txt" ? "text" : "." + activeTab}`;
-  els.openFolder.dataset.hasFile = "1";
-  void clean;
 }
 
 async function showResults(tab) {
@@ -445,6 +437,7 @@ els.openFolder.addEventListener("click", async () => {
 });
 
 /* ---------- settings persistence + device option gating ---------- */
+
 async function saveSettings() {
   try {
     await invoke("set_settings", {
@@ -470,7 +463,7 @@ async function updateGpuOption(cuda) {
     gpuOption.disabled = true;
     gpuOption.textContent = "GPU (CUDA — not available)";
   }
-  els.installGpuBtn.classList.toggle("hidden", cuda);
+  els.gpuNote.classList.toggle("hidden", cuda);
 }
 
 async function initDeviceOptions() {
@@ -496,15 +489,22 @@ async function initDeviceOptions() {
 initDeviceOptions();
 
 /* ---------- on-demand GPU (CUDA) install ---------- */
+
 let installUnlisten = null;
 
 els.installGpuBtn.addEventListener("click", async () => {
-  if (installUnlisten) return; // already installing
+  if (installUnlisten || busy || installing) return;
+  installing = true;
+  els.transcribeBtn.disabled = true;
+  els.langSelect.disabled = true;
+  els.deviceSelect.disabled = true;
   els.results.classList.add("hidden");
   els.progress.classList.remove("hidden");
   els.progressLog.innerHTML = "";
+  els.progressLog.classList.add("hidden");
   els.progressTitle.textContent = "Installing GPU support";
-  setProgress(2, "Resolving packages…");
+  setProgress(PHASE.start, "Resolving packages…");
+  setDevicePill("busy", "Installing GPU…");
 
   installUnlisten = await listen("cuda-install-progress", (e) => {
     const ev = e.payload;
@@ -512,14 +512,14 @@ els.installGpuBtn.addEventListener("click", async () => {
       if (ev.stage === "download" && ev.total > 0) {
         const frac = Math.min(1, ev.bytes / ev.total);
         setProgress(
-          2 + frac * 88,
+          PHASE.start + frac * 88,
           `Downloading ${ev.wheel} · ${(ev.bytes / 1e6).toFixed(0)} / ${(ev.total / 1e6).toFixed(0)} MB`,
         );
         logLine(`Downloading ${ev.wheel}…`);
       } else if (ev.stage === "extract") {
         setProgress(92, `Installing ${ev.wheel}…`);
       } else if (ev.stage === "resolve") {
-        setProgress(2, `Resolving ${ev.wheel}…`);
+        setProgress(PHASE.start, `Resolving ${ev.wheel}…`);
       }
     } else if (ev.event === "cuda_install_done") {
       setProgress(98, "Finishing…");
@@ -535,14 +535,20 @@ els.installGpuBtn.addEventListener("click", async () => {
       els.deviceSelect.value = "cuda";
       await saveSettings();
     }
+    setDevicePill("done", "Done");
   } catch (err) {
     els.progressTitle.textContent = "Install failed";
     setProgress(100, "Install failed");
+    setDevicePill("error", "Install failed");
     toast(`<b>GPU install failed</b>: ${err}`, "err");
     logLine(`ERROR: ${err}`);
   } finally {
     installUnlisten();
     installUnlisten = null;
+    installing = false;
     els.progress.classList.add("hidden");
+    els.transcribeBtn.disabled = currentFile ? false : true;
+    els.langSelect.disabled = false;
+    els.deviceSelect.disabled = false;
   }
 });
