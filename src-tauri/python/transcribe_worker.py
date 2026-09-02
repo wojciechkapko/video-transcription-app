@@ -64,8 +64,10 @@ def _bootstrap_cuda():
     return resolved, missing
 
 
-if os.name == "nt":
-    _bootstrap_cuda()
+# Result of the CUDA bootstrap: which compute-library families actually
+# resolved (and are therefore loadable). None on non-Windows, where we don't
+# gate device selection on window-specific DLLs.
+CUDA_FAMILIES_RESOLVED = _bootstrap_cuda()[0] if os.name == "nt" else None
 
 
 def emit(obj):
@@ -79,11 +81,19 @@ def choose_device():
         return explicit
     try:
         import ctranslate2
-        if ctranslate2.get_cuda_device_count() > 0:
-            return "cuda"
+        if ctranslate2.get_cuda_device_count() == 0:
+            return "cpu"
+        # A visible GPU isn't enough: the compute libraries (cuBLAS/cuDNN/
+        # cudart) must actually be loadable, or model load fails with
+        # "cublas64_*.dll not found". On Windows, gate on the bootstrap result
+        # from import time.
+        if CUDA_FAMILIES_RESOLVED is not None:
+            critical = {"cublas", "cudnn", "cudart"}
+            if not critical.issubset(set(CUDA_FAMILIES_RESOLVED)):
+                return "cpu"
+        return "cuda"
     except Exception:
-        pass
-    return "cpu"
+        return "cpu"
 
 
 def ts(s, sep):
@@ -104,6 +114,17 @@ def ts_vtt(s):
     return ts(s, ".")
 
 
+def _model_cached():
+    """True if the large-v3 snapshot is already in the HF hub cache."""
+    try:
+        root = os.environ.get("HF_HOME") or os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        return os.path.isdir(
+            os.path.join(root, "models--Systran--faster-whisper-large-v3"))
+    except Exception:
+        return False
+
+
 def _main():
     # Imports live inside the guarded call graph so an import failure lands in
     # main()'s structured JSON error path, not a bare traceback.
@@ -118,7 +139,11 @@ def _main():
         "int8_float16" if device == "cuda" else "int8"
     )
 
-    emit({"event": "loading_model", "device": device, "compute_type": compute_type})
+    if _model_cached():
+        emit({"event": "loading_model", "device": device, "compute_type": compute_type})
+    else:
+        emit({"event": "downloading_model", "device": device,
+              "note": "first run: downloading ~3 GB Whisper large-v3 model"})
     model = WhisperModel("large-v3", device=device, compute_type=compute_type)
 
     emit({"event": "transcribing", "file": os.path.basename(src), "device": device})

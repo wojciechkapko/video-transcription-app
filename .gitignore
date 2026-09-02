@@ -26,6 +26,9 @@ dist-ssr
 # Rust build output
 target/
 
+# Bundled portable Python runtime (regenerate with scripts/build_runtime.sh)
+runtime/
+
 # Python
 __pycache__/
 *.pyc

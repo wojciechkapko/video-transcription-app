@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use tauri::{Emitter, Manager, State};
 
 struct WorkerPath(PathBuf);
+struct BundledPython(Option<PathBuf>);
 
 #[derive(Deserialize)]
 struct TranscribeArgs {
@@ -18,11 +19,12 @@ struct TranscribeArgs {
 ///
 /// Priority:
 ///   1. `PYTHON_TRANSCRIBE` env var (full path to a python.exe), if it exists on disk.
-///   2. The author's dev venv (existence-checked, so it's inert on other machines).
-///   3. `python` / `python3` / `py` on PATH.
+///   2. The bundled portable runtime (`resources/runtime/python.exe`).
+///   3. The author's dev venv (debug builds only, so it's inert in release).
+///   4. `python` / `py` on PATH.
 ///
 /// On a clean install this returns an actionable error instead of a dead path.
-fn resolve_python() -> Result<String, String> {
+fn resolve_python(bundled: Option<&PathBuf>) -> Result<String, String> {
     if let Ok(p) = std::env::var("PYTHON_TRANSCRIBE") {
         let trimmed = p.trim();
         if !trimmed.is_empty() {
@@ -30,6 +32,13 @@ fn resolve_python() -> Result<String, String> {
             if pb.is_file() {
                 return Ok(pb.to_string_lossy().into_owned());
             }
+        }
+    }
+
+    // The self-contained CPU runtime bundled as a resource.
+    if let Some(p) = bundled {
+        if p.is_file() {
+            return Ok(p.to_string_lossy().into_owned());
         }
     }
 
@@ -77,9 +86,10 @@ async fn transcribe(
     window: tauri::Window,
     args: TranscribeArgs,
     state: State<'_, WorkerPath>,
+    bundled: State<'_, BundledPython>,
 ) -> Result<(), String> {
     let worker = state.0.clone();
-    let python = resolve_python()?;
+    let python = resolve_python(bundled.0.as_ref())?;
     let window2 = window.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -176,13 +186,19 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let resource_dir = app.path().resource_dir().ok();
+
+            // Bundled portable runtime (the self-contained CPU build), if present.
+            let runtime_python = resource_dir
+                .as_ref()
+                .map(|d| d.join("runtime").join("python.exe"))
+                .filter(|p| p.is_file());
+
             // Resolve the worker at runtime: bundled resource first, then the
             // source tree (covers `tauri dev`), then an explicit override.
-            let resource_worker = app
-                .path()
-                .resource_dir()
-                .map(|d| d.join("python").join("transcribe_worker.py"))
-                .ok();
+            let resource_worker = resource_dir
+                .as_ref()
+                .map(|d| d.join("python").join("transcribe_worker.py"));
             let dev_worker = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("python")
                 .join("transcribe_worker.py");
@@ -196,12 +212,13 @@ pub fn run() {
             } else {
                 eprintln!(
                     "WARNING: transcribe_worker.py not found in resources or source tree; \
-                                 transcription will fail."
+                     transcription will fail."
                 );
                 resource_worker.unwrap_or(dev_worker)
             };
 
             app.manage(WorkerPath(worker));
+            app.manage(BundledPython(runtime_python));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

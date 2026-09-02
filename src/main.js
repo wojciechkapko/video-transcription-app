@@ -217,14 +217,22 @@ els.transcribeBtn.addEventListener("click", async () => {
   const unlisten = await listen("transcribe-progress", (e) => {
     const ev = e.payload;
     switch (ev.event) {
-      case "loading_model":
-        currentDevice = ev.device || null;
-        els.progressTitle.textContent = "Loading model";
-        els.statDevice.textContent = deviceLabel(currentDevice);
-        setProgress(10, `Loading Whisper large-v3 model…`);
-        setDevicePill(currentDevice === "cuda" ? "gpu" : "cpu", `Loading · ${deviceLabel(currentDevice)}`);
-        logLine(`Loading model… (device: ${ev.device || "auto"})`);
-        break;
+      case "downloading_model":
+              currentDevice = ev.device || null;
+              els.progressTitle.textContent = "Downloading model";
+              els.statDevice.textContent = deviceLabel(currentDevice);
+              setProgress(8, "Downloading model (one-time ~3 GB)…");
+              setDevicePill(currentDevice === "cuda" ? "gpu" : "cpu", `Downloading · ${deviceLabel(currentDevice)}`);
+              logLine("Downloading Whisper large-v3 model (~3 GB, first run only)…");
+              break;
+            case "loading_model":
+              currentDevice = ev.device || null;
+              els.progressTitle.textContent = "Loading model";
+              els.statDevice.textContent = deviceLabel(currentDevice);
+              setProgress(10, `Loading Whisper large-v3 model…`);
+              setDevicePill(currentDevice === "cuda" ? "gpu" : "cpu", `Loading · ${deviceLabel(currentDevice)}`);
+              logLine(`Loading model… (device: ${ev.device || "auto"})`);
+              break;
       case "transcribing":
         els.progressTitle.textContent = "Transcribing";
         setProgress(15, `Transcribing…`);
