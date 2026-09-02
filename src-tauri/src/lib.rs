@@ -44,15 +44,20 @@ fn resolve_python(bundled: Option<&PathBuf>) -> Result<String, String> {
         }
     }
 
-    // Dev-machine convenience: compiled only into debug builds, so the
-    // personal venv path (and username) never ships in a release binary.
+    // Dev convenience (debug builds only): the Hermes venv python, resolved
+    // from LOCALAPPDATA so no username or absolute path is baked into source.
     #[cfg(debug_assertions)]
     {
-        let dev = PathBuf::from(
-            r"C:\Users\wojci\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe",
-        );
-        if dev.is_file() {
-            return Ok(dev.to_string_lossy().into_owned());
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let dev = PathBuf::from(local)
+                .join("hermes")
+                .join("hermes-agent")
+                .join("venv")
+                .join("Scripts")
+                .join("python.exe");
+            if dev.is_file() {
+                return Ok(dev.to_string_lossy().into_owned());
+            }
         }
     }
 
@@ -174,6 +179,45 @@ async fn transcribe(
 }
 
 #[tauri::command]
+async fn check_gpu(
+    state: State<'_, WorkerPath>,
+    bundled: State<'_, BundledPython>,
+) -> Result<bool, String> {
+    let worker = state.0.clone();
+    let python = match resolve_python(bundled.0.as_ref()) {
+        Ok(p) => p,
+        // No interpreter at all -> no CUDA (frontend disables the GPU option).
+        Err(_) => return Ok(false),
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = Command::new(&python)
+            .arg(&worker)
+            .arg("--probe")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| format!("probe spawn failed: {e}"))?;
+
+        // The worker may also print cuda_bootstrap lines; find probe_result.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines().rev() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if v.get("event").and_then(|e| e.as_str()) == Some("probe_result") {
+                    return Ok(v
+                        .get("cuda_available")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false));
+                }
+            }
+        }
+        Ok(false)
+    })
+    .await
+    .map_err(|e| format!("probe task join: {e}"))?
+}
+
+#[tauri::command]
 fn read_transcript(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
@@ -238,6 +282,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             transcribe,
+            check_gpu,
             read_transcript,
             open_in_folder
         ])

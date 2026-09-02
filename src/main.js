@@ -384,3 +384,19 @@ els.copyActive.addEventListener("click", async () => {
 els.openFolder.addEventListener("click", async () => {
   if (outputPaths.txt) await invoke("open_in_folder", { path: outputPaths.txt });
 });
+
+/* ---------- device option gating ---------- */
+async function initDeviceOptions() {
+  const gpuOption = els.deviceSelect.querySelector('option[value="cuda"]');
+  if (!gpuOption) return;
+  try {
+    const cuda = await invoke("check_gpu");
+    if (!cuda) {
+      gpuOption.disabled = true;
+      gpuOption.textContent = "GPU (CUDA — not available)";
+    }
+  } catch {
+    // Probe failed: leave "GPU" selectable; Auto still falls back to CPU safely.
+  }
+}
+initDeviceOptions();

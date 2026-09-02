@@ -303,6 +303,19 @@ def _main():
           "vtt": out_prefix + ".vtt"})
 
 
+def _probe_device():
+    """Lightweight CUDA-availability probe (no model load).
+
+    Returns the same device `choose_device()` would pick, so the frontend can
+    disable the GPU option when CUDA isn't actually usable.
+    """
+    try:
+        dev = choose_device()
+        return {"event": "probe_result", "device": dev, "cuda_available": dev == "cuda"}
+    except Exception as e:
+        return {"event": "probe_result", "cuda_available": False, "error": str(e)}
+
+
 def main():
     try:
         _main()
@@ -316,4 +329,7 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--probe":
+        emit(_probe_device())
+        sys.exit(0)
     main()
