@@ -110,7 +110,7 @@ function logLine(msg) {
 }
 
 function setProgress(pct, status) {
-  const p = Math.max(2, Math.min(99, pct));
+  const p = Math.max(2, Math.min(100, pct));
   els.progressFill.style.width = `${p}%`;
   els.progressPct.textContent = `${Math.round(p)}%`;
   if (status != null) els.progressStatus.textContent = status;

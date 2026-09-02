@@ -5,6 +5,20 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 
+// Windows-only: CREATE_NO_WINDOW stops the GUI app from flashing a console
+// window every time it spawns python.exe (a console-subsystem binary). Without
+// it the black terminal the user saw appears and lingers during processing.
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Configure a child so it never shows a console window. No-op off Windows.
+fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
 struct WorkerPath(PathBuf);
 struct BundledPython(Option<PathBuf>);
 
@@ -145,6 +159,7 @@ async fn transcribe(
         if let Some(d) = force_device {
             cmd.env("TRANSCRIBE_DEVICE", d);
         }
+        hide_console(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
 
@@ -246,11 +261,12 @@ fn cancel_transcribe(run: State<'_, SharedRunState>) -> Result<(), String> {
     if let Some(pid) = pid {
         #[cfg(target_os = "windows")]
         {
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
+            let mut cmd = Command::new("taskkill");
+            cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+                .stderr(Stdio::null());
+            hide_console(&mut cmd);
+            let _ = cmd.status();
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -280,11 +296,13 @@ async fn check_gpu(
     };
 
     tauri::async_runtime::spawn_blocking(move || {
-        let out = Command::new(&python)
-            .arg(&worker)
+        let mut cmd = Command::new(&python);
+        cmd.arg(&worker)
             .arg("--probe")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        hide_console(&mut cmd);
+        let out = cmd
             .output()
             .map_err(|e| format!("probe spawn failed: {e}"))?;
 
@@ -317,13 +335,13 @@ async fn install_cuda(
     let window2 = window.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let mut child = Command::new(&python)
-            .arg(&worker)
+        let mut cmd = Command::new(&python);
+        cmd.arg(&worker)
             .arg("--install-cuda")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to spawn: {e}"))?;
+            .stderr(Stdio::piped());
+        hide_console(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
 
         // Drain stderr concurrently (same deadlock-avoidance as transcribe).
         let stderr_rx = child.stderr.take().map(|mut se| {
