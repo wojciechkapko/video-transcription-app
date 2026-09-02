@@ -218,6 +218,64 @@ async fn check_gpu(
 }
 
 #[tauri::command]
+async fn install_cuda(
+    window: tauri::Window,
+    state: State<'_, WorkerPath>,
+    bundled: State<'_, BundledPython>,
+) -> Result<(), String> {
+    let worker = state.0.clone();
+    let python = resolve_python(bundled.0.as_ref())?;
+    let window2 = window.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut child = Command::new(&python)
+            .arg(&worker)
+            .arg("--install-cuda")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to spawn: {e}"))?;
+
+        // Drain stderr concurrently (same deadlock-avoidance as transcribe).
+        let stderr_rx = child.stderr.take().map(|mut se| {
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                let _ = std::io::Read::read_to_string(&mut se, &mut buf);
+                let _ = tx.send(buf);
+            });
+            rx
+        });
+
+        if let Some(stdout) = child.stdout.take() {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                if let Ok(l) = line {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&l) {
+                        let _ = window2.emit("cuda-install-progress", &v);
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().map_err(|e| format!("wait: {e}"))?;
+        let stderr_text = stderr_rx.and_then(|rx| rx.recv().ok()).unwrap_or_default();
+
+        if !status.success() {
+            let tail = last_lines(stderr_text.trim(), 25);
+            let base = format!("CUDA install failed (exit code {:?})", status.code());
+            if tail.is_empty() {
+                return Err(base);
+            }
+            return Err(format!("{base}\n--- worker output ---\n{tail}"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task join: {e}"))?
+}
+
+#[tauri::command]
 fn read_transcript(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
@@ -333,6 +391,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             transcribe,
             check_gpu,
+            install_cuda,
             get_settings,
             set_settings,
             read_transcript,

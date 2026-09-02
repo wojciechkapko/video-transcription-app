@@ -23,8 +23,9 @@ const els = {
   browseBtn: $("browse-btn"),
   changeFile: $("change-file"),
   langSelect: $("lang-select"),
-  deviceSelect: $("device-select"),
-  transcribeBtn: $("transcribe-btn"),
+    deviceSelect: $("device-select"),
+    installGpuBtn: $("install-gpu-btn"),
+    transcribeBtn: $("transcribe-btn"),
   progress: $("progress"),
   progressTitle: $("progress-title"),
   progressPct: $("progress-pct"),
@@ -398,18 +399,27 @@ async function saveSettings() {
 els.deviceSelect.addEventListener("change", saveSettings);
 els.langSelect.addEventListener("change", saveSettings);
 
-async function initDeviceOptions() {
+async function updateGpuOption(cuda) {
   const gpuOption = els.deviceSelect.querySelector('option[value="cuda"]');
+  if (!gpuOption) return;
+  if (cuda) {
+    gpuOption.disabled = false;
+    gpuOption.textContent = "GPU (CUDA)";
+  } else {
+    gpuOption.disabled = true;
+    gpuOption.textContent = "GPU (CUDA — not available)";
+  }
+  els.installGpuBtn.classList.toggle("hidden", cuda);
+}
+
+async function initDeviceOptions() {
   let cuda = false;
   try {
     cuda = await invoke("check_gpu");
   } catch {
     // Probe failed: leave "GPU" selectable; Auto still falls back to CPU safely.
   }
-  if (!cuda && gpuOption) {
-    gpuOption.disabled = true;
-    gpuOption.textContent = "GPU (CUDA — not available)";
-  }
+  await updateGpuOption(cuda);
 
   // Restore last-selected device + language (defaults to "auto" on first run).
   try {
@@ -423,3 +433,52 @@ async function initDeviceOptions() {
   }
 }
 initDeviceOptions();
+
+/* ---------- on-demand GPU (CUDA) install ---------- */
+let installUnlisten = null;
+
+els.installGpuBtn.addEventListener("click", async () => {
+  if (installUnlisten) return; // already installing
+  els.results.classList.add("hidden");
+  els.progress.classList.remove("hidden");
+  els.progressLog.innerHTML = "";
+  els.progressTitle.textContent = "Installing GPU support";
+  setProgress(2, "Resolving packages…");
+
+  installUnlisten = await listen("cuda-install-progress", (e) => {
+    const ev = e.payload;
+    if (ev.event === "cuda_install_progress") {
+      if (ev.stage === "download" && ev.total > 0) {
+        const frac = Math.min(1, ev.bytes / ev.total);
+        setProgress(2 + frac * 88, `Downloading ${ev.wheel} · ${(ev.bytes / 1e6).toFixed(0)} / ${(ev.total / 1e6).toFixed(0)} MB`);
+        logLine(`Downloading ${ev.wheel}…`);
+      } else if (ev.stage === "extract") {
+        setProgress(92, `Installing ${ev.wheel}…`);
+      } else if (ev.stage === "resolve") {
+        setProgress(2, `Resolving ${ev.wheel}…`);
+      }
+    } else if (ev.event === "cuda_install_done") {
+      setProgress(98, "Finishing…");
+    }
+  });
+
+  try {
+    await invoke("install_cuda");
+    toast("<b>GPU support installed</b>", "ok");
+    const cuda = await invoke("check_gpu").catch(() => false);
+    await updateGpuOption(cuda);
+    if (cuda) {
+      els.deviceSelect.value = "cuda";
+      await saveSettings();
+    }
+  } catch (err) {
+    els.progressTitle.textContent = "Install failed";
+    setProgress(100, "Install failed");
+    toast(`<b>GPU install failed</b>: ${err}`, "err");
+    logLine(`ERROR: ${err}`);
+  } finally {
+    installUnlisten();
+    installUnlisten = null;
+    els.progress.classList.add("hidden");
+  }
+});

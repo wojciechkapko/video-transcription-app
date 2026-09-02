@@ -52,12 +52,13 @@
                 <option value="pt">Portuguese</option>
               </select>
               <label for="device-select">Device</label>
-              <select id="device-select">
-                <option value="auto">Auto (GPU → CPU)</option>
-                <option value="cpu">CPU</option>
-                <option value="cuda">GPU (CUDA)</option>
-              </select>
-              <button id="transcribe-btn" disabled>Transcribe</button>
+                      <select id="device-select">
+                        <option value="auto">Auto (GPU → CPU)</option>
+                        <option value="cpu">CPU</option>
+                        <option value="cuda">GPU (CUDA)</option>
+                      </select>
+                      <span class="link hidden" id="install-gpu-btn">Install GPU support (~1.1 GB)</span>
+                      <button id="transcribe-btn" disabled>Transcribe</button>
             </section>
 
       <!-- Progress -->

@@ -9,10 +9,16 @@ and a non-zero exit code.
 import os, time, glob, ctypes, site, sys, json, traceback
 
 # ---- CUDA DLL bootstrap (Windows) ----
-def _bootstrap_cuda():
-    """Register every installed nvidia wheel's bin/ dir on the DLL search path
-    and eagerly load the CUDA runtime families, so pip-installed CUDA/cuDNN
-    doesn't fail at import. Returns (resolved, missing) family names."""
+def _cuda_dir():
+    """Per-user dir where on-demand NVIDIA libs are installed (writable — the
+    bundled runtime under the install dir is not)."""
+    localappdata = os.environ.get("LOCALAPPDATA")
+    return os.path.join(localappdata, "whisper-transcribe", "cuda") if localappdata else None
+
+
+def _nvidia_roots():
+    """Candidate nvidia/ roots: the runtime's own site-packages plus the
+    per-user CUDA dir we install into on demand."""
     _sp = None
     for p in site.getsitepackages():
         if p.endswith("site-packages"):
@@ -20,18 +26,17 @@ def _bootstrap_cuda():
             break
     if _sp is None:
         _sp = os.path.join(sys.prefix, "Lib", "site-packages")
-    base = os.path.join(_sp, "nvidia")
+    roots = [os.path.join(_sp, "nvidia")]
+    cuda_dir = _cuda_dir()
+    if cuda_dir:
+        roots.append(os.path.join(cuda_dir, "nvidia"))
+    return roots
 
-    for dll_dir in glob.glob(os.path.join(base, "*", "bin")):
-        try:
-            os.add_dll_directory(dll_dir)
-            os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
-        except Exception as exc:
-            print(json.dumps({"event": "cuda_bootstrap", "path": dll_dir, "error": str(exc)}), flush=True)
 
-    # Match by family prefix, not exact SONAME: NVIDIA wheels bump the trailing
-    # digit on upgrade (cudnn64_9 -> cudnn64_10), so hardcoding the version
-    # silently breaks the probe while the DLLs are actually present.
+def _bootstrap_cuda():
+    """Register every nvidia/*/bin dir on the DLL search path and eagerly load
+    the CUDA runtime families, so pip-installed CUDA/cuDNN resolves at import.
+    Returns (resolved, missing) family names."""
     families = {
         "cublas": "cublas64_*.dll",
         "cublasLt": "cublasLt64_*.dll",
@@ -39,24 +44,37 @@ def _bootstrap_cuda():
         "cudart": "cudart64_*.dll",
         "nvrtc": "nvrtc64_*.dll",
     }
+
+    for base in _nvidia_roots():
+        for dll_dir in glob.glob(os.path.join(base, "*", "bin")):
+            try:
+                os.add_dll_directory(dll_dir)
+                os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
+            except Exception as exc:
+                print(json.dumps({"event": "cuda_bootstrap", "path": dll_dir, "error": str(exc)}), flush=True)
+
+    # Match by family prefix, not exact SONAME: NVIDIA wheels bump the trailing
+    # digit on upgrade (cudnn64_9 -> cudnn64_10), so hardcoding the version
+    # silently breaks the probe while the DLLs are actually present.
     resolved, missing = [], []
     for fam, pattern in families.items():
         loaded = False
-        for path in glob.glob(os.path.join(base, "*", "bin", pattern)):
-            try:
-                ctypes.WinDLL(path)
-                loaded = True
+        for base in _nvidia_roots():
+            for path in glob.glob(os.path.join(base, "*", "bin", pattern)):
+                try:
+                    ctypes.WinDLL(path)
+                    loaded = True
+                    break
+                except Exception:
+                    continue
+            if loaded:
                 break
-            except Exception:
-                continue
         (resolved if loaded else missing).append(fam)
 
     # Surface only a *partial* CUDA install (some families present, others
-    # missing) — that's a real breakage worth surfacing. A fully-absent
-    # nvidia/ dir means a clean CPU-only machine, and choose_device() already
-    # falls back to CPU silently; don't raise a scary false alarm there. The
-    # explicit-cuda case is surfaced even when nothing resolved, so a user who
-    # forced CUDA sees *why* it can't be used.
+    # missing) — a real breakage worth surfacing. A fully-absent nvidia/ dir
+    # means a clean CPU-only machine; choose_device() falls back to CPU
+    # silently. The forced-CUDA case is surfaced even when nothing resolved.
     explicit_cuda = os.environ.get("TRANSCRIBE_DEVICE", "").strip().lower() == "cuda"
     if missing and (resolved or explicit_cuda):
         print(json.dumps({"event": "cuda_bootstrap",
@@ -303,6 +321,85 @@ def _main():
           "vtt": out_prefix + ".vtt"})
 
 
+# ---- on-demand CUDA install (pip-free) ----
+# Known-good pin set (matches the dev venv proven to work with the bundled
+# ctranslate2 4.8.2). nvrtc is omitted — not needed for inference.
+CUDA_WHEELS = [
+    ("nvidia-cublas-cu12", "12.9.2.10"),
+    ("nvidia-cudnn-cu12", "9.25.1.1"),
+    ("nvidia-cuda-runtime-cu12", "12.9.79"),
+]
+
+
+def _resolve_wheel(name, version):
+    """Return (url, sha256) for the win_amd64 bdist_wheel from PyPI."""
+    import httpx
+    resp = httpx.get(f"https://pypi.org/pypi/{name}/{version}/json", timeout=30.0)
+    resp.raise_for_status()
+    data = resp.json()
+    for f in data.get("urls", []):
+        if f.get("packagetype") == "bdist_wheel" and "win_amd64" in f.get("filename", ""):
+            return f["url"], (f.get("digests") or {}).get("sha256")
+    raise RuntimeError(f"no win_amd64 wheel for {name}=={version}")
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _download_wheel(name, version, url, sha, dest_dir, progress):
+    import httpx
+    dest = os.path.join(dest_dir, f"{name}-{version}.whl")
+    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as resp:
+        resp.raise_for_status()
+        total = int(resp.headers.get("content-length") or 0)
+        done = 0
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                f.write(chunk)
+                done += len(chunk)
+                progress(name, done, total)
+    if sha and _sha256(dest) != sha:
+        os.remove(dest)
+        raise RuntimeError(f"checksum mismatch for {name}-{version}")
+    return dest
+
+
+def _extract_wheel(wheel_path, dest_dir):
+    import zipfile
+    with zipfile.ZipFile(wheel_path) as z:
+        z.extractall(dest_dir)
+    os.remove(wheel_path)
+
+
+def _install_cuda():
+    cuda_dir = _cuda_dir()
+    if not cuda_dir:
+        raise RuntimeError("LOCALAPPDATA not set; cannot choose an install location")
+    os.makedirs(cuda_dir, exist_ok=True)
+
+    def progress(name, done, total):
+        emit({"event": "cuda_install_progress", "stage": "download",
+              "wheel": name, "bytes": done, "total": total})
+
+    for i, (name, version) in enumerate(CUDA_WHEELS):
+        emit({"event": "cuda_install_progress", "stage": "resolve",
+              "wheel": name, "index": i, "count": len(CUDA_WHEELS)})
+        url, sha = _resolve_wheel(name, version)
+        emit({"event": "cuda_install_progress", "stage": "download",
+              "wheel": name, "bytes": 0, "total": 0})
+        wheel_path = _download_wheel(name, version, url, sha, cuda_dir, progress)
+        emit({"event": "cuda_install_progress", "stage": "extract", "wheel": name})
+        _extract_wheel(wheel_path, cuda_dir)
+
+    emit({"event": "cuda_install_done", "dir": cuda_dir})
+
+
 def _probe_device():
     """Lightweight CUDA-availability probe (no model load).
 
@@ -332,4 +429,12 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--probe":
         emit(_probe_device())
         sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--install-cuda":
+        try:
+            _install_cuda()
+            sys.exit(0)
+        except Exception as exc:
+            emit({"event": "error", "message": str(exc)})
+            traceback.print_exc()
+            sys.exit(1)
     main()
