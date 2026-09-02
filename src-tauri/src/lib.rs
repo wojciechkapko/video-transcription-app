@@ -158,6 +158,11 @@ async fn transcribe(
             r.cancelled
         };
         if kill_now {
+            // child.kill() (not taskkill /T /F) is enough here: the worker is a
+            // single process (faster-whisper/PyAV run ffmpeg in-process), and at
+            // this point it's still importing + loading the model — it hasn't
+            // opened any .part files yet, so there's nothing to clean up. If the
+            // worker ever forks or writes outputs earlier, revisit both.
             let _ = child.kill();
         }
 
