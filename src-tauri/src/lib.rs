@@ -13,6 +13,8 @@ struct TranscribeArgs {
     output: String,
     #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    device: Option<String>,
 }
 
 /// Resolve the Python interpreter that has `faster-whisper` installed.
@@ -93,6 +95,15 @@ async fn transcribe(
     let window2 = window.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        // Optional device override ("cpu" | "cuda"); passed to the worker via
+        // the TRANSCRIBE_DEVICE env var it already honors. Empty/"auto" means
+        // probe.
+        let force_device = args
+            .device
+            .as_ref()
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty() && d != "auto");
+
         let mut cmd = Command::new(&python);
         cmd.arg(&worker)
             .arg(&args.input)
@@ -100,6 +111,10 @@ async fn transcribe(
             .arg(args.language.unwrap_or_else(|| "auto".into()))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        if let Some(d) = force_device {
+            cmd.env("TRANSCRIBE_DEVICE", d);
+        }
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
 

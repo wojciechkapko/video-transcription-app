@@ -38,21 +38,27 @@
       </section>
 
       <!-- Options -->
-      <section class="options" id="options">
-        <label for="lang-select">Language</label>
-        <select id="lang-select">
-          <option value="auto">Auto-detect</option>
-          <option value="en">English</option>
-          <option value="pl">Polish</option>
-          <option value="de">German</option>
-          <option value="es">Spanish</option>
-          <option value="fr">French</option>
-          <option value="it">Italian</option>
-          <option value="nl">Dutch</option>
-          <option value="pt">Portuguese</option>
-        </select>
-        <button id="transcribe-btn" disabled>Transcribe</button>
-      </section>
+            <section class="options" id="options">
+              <label for="lang-select">Language</label>
+              <select id="lang-select">
+                <option value="auto">Auto-detect</option>
+                <option value="en">English</option>
+                <option value="pl">Polish</option>
+                <option value="de">German</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="it">Italian</option>
+                <option value="nl">Dutch</option>
+                <option value="pt">Portuguese</option>
+              </select>
+              <label for="device-select">Device</label>
+              <select id="device-select">
+                <option value="auto">Auto (GPU → CPU)</option>
+                <option value="cpu">CPU</option>
+                <option value="cuda">GPU (CUDA)</option>
+              </select>
+              <button id="transcribe-btn" disabled>Transcribe</button>
+            </section>
 
       <!-- Progress -->
       <section id="progress" class="progress hidden">

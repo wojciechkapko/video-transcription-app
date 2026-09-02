@@ -23,6 +23,7 @@ const els = {
   browseBtn: $("browse-btn"),
   changeFile: $("change-file"),
   langSelect: $("lang-select"),
+  deviceSelect: $("device-select"),
   transcribeBtn: $("transcribe-btn"),
   progress: $("progress"),
   progressTitle: $("progress-title"),
@@ -198,6 +199,7 @@ els.transcribeBtn.addEventListener("click", async () => {
   els.transcribeBtn.disabled = true;
   els.transcribeBtn.textContent = "Transcribing…";
   els.langSelect.disabled = true;
+  els.deviceSelect.disabled = true;
   els.results.classList.add("hidden");
   els.progress.classList.remove("hidden");
   els.progressLog.innerHTML = "";
@@ -213,6 +215,7 @@ els.transcribeBtn.addEventListener("click", async () => {
   const base = currentFile.replace(/\.[^.]+$/, "");
   const output = base + "_transcript";
   const language = els.langSelect.value;
+  const device = els.deviceSelect.value;
 
   const unlisten = await listen("transcribe-progress", (e) => {
     const ev = e.payload;
@@ -277,7 +280,12 @@ els.transcribeBtn.addEventListener("click", async () => {
 
   try {
     await invoke("transcribe", {
-      args: { input: currentFile, output, language: language === "auto" ? null : language },
+      args: {
+        input: currentFile,
+        output,
+        language: language === "auto" ? null : language,
+        device: device === "auto" ? null : device,
+      },
     });
   } catch (err) {
     setProgress(100, `Error`);
@@ -288,12 +296,13 @@ els.transcribeBtn.addEventListener("click", async () => {
     return;
   } finally {
     unlisten();
+    busy = false;
+    els.transcribeBtn.disabled = false;
+    els.transcribeBtn.textContent = "Transcribe";
+    els.langSelect.disabled = false;
+    els.deviceSelect.disabled = false;
   }
 
-  busy = false;
-  els.transcribeBtn.disabled = false;
-  els.transcribeBtn.textContent = "Transcribe";
-  els.langSelect.disabled = false;
   setDevicePill("done", "Done");
   await showResults(activeTab);
 });
