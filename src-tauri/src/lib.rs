@@ -2,10 +2,21 @@ use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 
 struct WorkerPath(PathBuf);
 struct BundledPython(Option<PathBuf>);
+
+/// Tracks the in-flight transcription so a separate `cancel` command can find
+/// and kill the worker process and delete its `.part` temp files.
+#[derive(Default)]
+struct RunState {
+    pid: Option<u32>,
+    output: Option<String>,
+    cancelled: bool,
+}
+type SharedRunState = Arc<Mutex<RunState>>;
 
 #[derive(Deserialize)]
 struct TranscribeArgs {
@@ -94,10 +105,12 @@ async fn transcribe(
     args: TranscribeArgs,
     state: State<'_, WorkerPath>,
     bundled: State<'_, BundledPython>,
+    run: State<'_, SharedRunState>,
 ) -> Result<(), String> {
     let worker = state.0.clone();
     let python = resolve_python(bundled.0.as_ref())?;
     let window2 = window.clone();
+    let run2 = run.inner().clone();
 
     tauri::async_runtime::spawn_blocking(move || {
         // Optional device override ("cpu" | "cuda"); passed to the worker via
@@ -109,10 +122,12 @@ async fn transcribe(
             .map(|d| d.trim().to_string())
             .filter(|d| !d.is_empty() && d != "auto");
 
+        let output_prefix = args.output.clone();
+
         let mut cmd = Command::new(&python);
         cmd.arg(&worker)
             .arg(&args.input)
-            .arg(&args.output)
+            .arg(&output_prefix)
             .arg(args.language.unwrap_or_else(|| "auto".into()))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -122,6 +137,13 @@ async fn transcribe(
         }
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
+
+        {
+            let mut r = run2.lock().unwrap();
+            r.pid = Some(child.id());
+            r.output = Some(output_prefix);
+            r.cancelled = false;
+        }
 
         // Drain stderr concurrently so a chatty traceback can't fill the pipe
         // buffer and deadlock the child (which we'd otherwise only read after
@@ -153,6 +175,18 @@ async fn transcribe(
 
         let status = child.wait().map_err(|e| format!("wait: {e}"))?;
 
+        // Deregister the run and check whether a cancel was requested while we
+        // were streaming.
+        let cancelled = {
+            let mut r = run2.lock().unwrap();
+            r.pid = None;
+            r.output = None;
+            r.cancelled
+        };
+        if cancelled {
+            return Err("cancelled".to_string());
+        }
+
         let stderr_text = stderr_rx.and_then(|rx| rx.recv().ok()).unwrap_or_default();
 
         if !status.success() {
@@ -176,6 +210,40 @@ async fn transcribe(
     })
     .await
     .map_err(|e| format!("task join: {e}"))?
+}
+
+#[tauri::command]
+fn cancel_transcribe(run: State<'_, SharedRunState>) -> Result<(), String> {
+    // Mark cancelled first (so the in-flight transcribe returns "cancelled"),
+    // then capture the pid/output to act on.
+    let (pid, output) = {
+        let mut r = run.lock().unwrap();
+        r.cancelled = true;
+        (r.pid, r.output.clone())
+    };
+
+    if let Some(pid) = pid {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+    }
+
+    // Remove the worker's `.part` temp files so a cancelled run leaves nothing.
+    if let Some(output) = output {
+        for ext in ["txt", "srt", "vtt"] {
+            let _ = std::fs::remove_file(format!("{output}.{ext}.part"));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -386,10 +454,12 @@ pub fn run() {
 
             app.manage(WorkerPath(worker));
             app.manage(BundledPython(runtime_python));
+            app.manage(Arc::new(Mutex::new(RunState::default())));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             transcribe,
+            cancel_transcribe,
             check_gpu,
             install_cuda,
             get_settings,

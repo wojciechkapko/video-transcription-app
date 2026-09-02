@@ -7,10 +7,10 @@ let currentFile = null;
 let currentFileName = null;
 let outputPaths = { txt: null, srt: null, vtt: null };
 let busy = false;
-let mediaDuration = 0;          // set from worker events; drives the progress bar
-let currentDevice = null;       // "cuda" | "cpu" | null
-let runStart = 0;               // performance.now() at transcribe start
-let lastFrac = 0;               // last media fraction for ETA
+let mediaDuration = 0; // set from worker events; drives the progress bar
+let currentDevice = null; // "cuda" | "cpu" | null
+let runStart = 0; // performance.now() at transcribe start
+let lastFrac = 0; // last media fraction for ETA
 let activeTab = "txt";
 
 const els = {
@@ -23,9 +23,9 @@ const els = {
   browseBtn: $("browse-btn"),
   changeFile: $("change-file"),
   langSelect: $("lang-select"),
-    deviceSelect: $("device-select"),
-    installGpuBtn: $("install-gpu-btn"),
-    transcribeBtn: $("transcribe-btn"),
+  deviceSelect: $("device-select"),
+  installGpuBtn: $("install-gpu-btn"),
+  transcribeBtn: $("transcribe-btn"),
   progress: $("progress"),
   progressTitle: $("progress-title"),
   progressPct: $("progress-pct"),
@@ -55,7 +55,8 @@ function fmtClock(sec) {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  if (h > 0)
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
@@ -118,7 +119,7 @@ function progressPct(ev) {
 
 function updateEta(ev) {
   if (runStart && ev.elapsed_s > 1 && mediaDuration > 0 && lastFrac > 0.01) {
-    const rate = lastFrac / ev.elapsed_s;         // fraction per second
+    const rate = lastFrac / ev.elapsed_s; // fraction per second
     const remain = (1 - lastFrac) / rate;
     els.statEta.textContent = fmtClock(remain);
   } else {
@@ -154,7 +155,7 @@ listen("tauri://drag-enter", () => {
 }).catch(() => {});
 
 ["tauri://drag-leave", "tauri://drag-drop"].forEach((ev) =>
-  listen(ev, () => els.dropzone.classList.remove("dragover")).catch(() => {})
+  listen(ev, () => els.dropzone.classList.remove("dragover")).catch(() => {}),
 );
 
 /* ---------- browse ---------- */
@@ -168,8 +169,24 @@ function pickFile() {
         {
           name: "Media",
           extensions: [
-            "mp4", "mkv", "mov", "webm", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", "ts",
-            "mp3", "wav", "flac", "m4a", "aac", "ogg", "wma",
+            "mp4",
+            "mkv",
+            "mov",
+            "webm",
+            "avi",
+            "m4v",
+            "mpg",
+            "mpeg",
+            "wmv",
+            "flv",
+            "ts",
+            "mp3",
+            "wav",
+            "flac",
+            "m4a",
+            "aac",
+            "ogg",
+            "wma",
           ],
         },
       ],
@@ -189,16 +206,23 @@ els.dropzone.addEventListener("click", () => {
 
 /* ---------- transcribe ---------- */
 
+function cancelTranscription() {
+  invoke("cancel_transcribe").catch(() => {});
+}
+
 els.transcribeBtn.addEventListener("click", async () => {
-  if (!currentFile || busy) return;
+  if (busy) {
+    cancelTranscription();
+    return;
+  }
+  if (!currentFile) return;
   busy = true;
   runStart = performance.now();
   mediaDuration = 0;
   lastFrac = 0;
   currentDevice = null;
 
-  els.transcribeBtn.disabled = true;
-  els.transcribeBtn.textContent = "Transcribing…";
+  els.transcribeBtn.textContent = "Cancel";
   els.langSelect.disabled = true;
   els.deviceSelect.disabled = true;
   els.results.classList.add("hidden");
@@ -222,30 +246,39 @@ els.transcribeBtn.addEventListener("click", async () => {
     const ev = e.payload;
     switch (ev.event) {
       case "downloading_model":
-              currentDevice = ev.device || null;
-              els.progressTitle.textContent = "Downloading model";
-              els.statDevice.textContent = deviceLabel(currentDevice);
-              setProgress(8, "Downloading model (one-time ~3 GB)…");
-              setDevicePill(currentDevice === "cuda" ? "gpu" : "cpu", `Downloading · ${deviceLabel(currentDevice)}`);
-              logLine("Downloading Whisper large-v3 model…");
-              break;
-            case "download_progress": {
-              if (ev.total > 0) {
-                const frac = Math.min(0.9, ev.bytes / ev.total);
-                const done = (ev.bytes / 1e9).toFixed(2);
-                const total = (ev.total / 1e9).toFixed(2);
-                setProgress(8 + frac * 82, `Downloading model · ${done} / ${total} GB`);
-              }
-              break;
-            }
-            case "loading_model":
-              currentDevice = ev.device || null;
-              els.progressTitle.textContent = "Loading model";
-              els.statDevice.textContent = deviceLabel(currentDevice);
-              setProgress(95, `Loading Whisper large-v3 model…`);
-              setDevicePill(currentDevice === "cuda" ? "gpu" : "cpu", `Loading · ${deviceLabel(currentDevice)}`);
-              logLine(`Loading model… (device: ${ev.device || "auto"})`);
-              break;
+        currentDevice = ev.device || null;
+        els.progressTitle.textContent = "Downloading model";
+        els.statDevice.textContent = deviceLabel(currentDevice);
+        setProgress(8, "Downloading model (one-time ~3 GB)…");
+        setDevicePill(
+          currentDevice === "cuda" ? "gpu" : "cpu",
+          `Downloading · ${deviceLabel(currentDevice)}`,
+        );
+        logLine("Downloading Whisper large-v3 model…");
+        break;
+      case "download_progress": {
+        if (ev.total > 0) {
+          const frac = Math.min(0.9, ev.bytes / ev.total);
+          const done = (ev.bytes / 1e9).toFixed(2);
+          const total = (ev.total / 1e9).toFixed(2);
+          setProgress(
+            8 + frac * 82,
+            `Downloading model · ${done} / ${total} GB`,
+          );
+        }
+        break;
+      }
+      case "loading_model":
+        currentDevice = ev.device || null;
+        els.progressTitle.textContent = "Loading model";
+        els.statDevice.textContent = deviceLabel(currentDevice);
+        setProgress(95, `Loading Whisper large-v3 model…`);
+        setDevicePill(
+          currentDevice === "cuda" ? "gpu" : "cpu",
+          `Loading · ${deviceLabel(currentDevice)}`,
+        );
+        logLine(`Loading model… (device: ${ev.device || "auto"})`);
+        break;
       case "transcribing":
         els.progressTitle.textContent = "Transcribing";
         setProgress(15, `Transcribing…`);
@@ -254,10 +287,15 @@ els.transcribeBtn.addEventListener("click", async () => {
         break;
       case "detected_language":
         if (ev.duration_s) mediaDuration = ev.duration_s;
-        logLine(`Detected language: ${ev.language} (${Math.round((ev.probability || 0) * 100)}%)`);
+        logLine(
+          `Detected language: ${ev.language} (${Math.round((ev.probability || 0) * 100)}%)`,
+        );
         break;
       case "progress":
-        setProgress(progressPct(ev), `${ev.segments} segments · ${Math.round(ev.elapsed_s)}s`);
+        setProgress(
+          progressPct(ev),
+          `${ev.segments} segments · ${Math.round(ev.elapsed_s)}s`,
+        );
         els.statElapsed.textContent = fmtClock(ev.elapsed_s);
         els.statSegments.textContent = String(ev.segments);
         updateEta(ev);
@@ -273,14 +311,17 @@ els.transcribeBtn.addEventListener("click", async () => {
         els.statSegments.textContent = String(ev.segments);
         els.statEta.textContent = "0:00";
         renderStats(ev);
-        logLine(`Finished: ${ev.segments} segments, ${Math.round(ev.elapsed_s)}s`);
+        logLine(
+          `Finished: ${ev.segments} segments, ${Math.round(ev.elapsed_s)}s`,
+        );
         break;
       }
       default:
         // Diagnostic events (cuda_bootstrap, …) — keep the log useful, not noisy.
         if (ev.event === "cuda_bootstrap") {
           const missing = ev.missing;
-          if (missing && missing.length) logLine(`CUDA: missing ${missing.join(", ")}`);
+          if (missing && missing.length)
+            logLine(`CUDA: missing ${missing.join(", ")}`);
         } else {
           logLine(`[${ev.event || "unknown"}] ${JSON.stringify(ev)}`);
         }
@@ -298,11 +339,19 @@ els.transcribeBtn.addEventListener("click", async () => {
       },
     });
   } catch (err) {
-    setProgress(100, `Error`);
-    els.progressTitle.textContent = "Failed";
-    setDevicePill("error", "Error");
-    logLine(`ERROR: ${err}`);
-    toast(`<b>Transcription failed</b> — see log for details`, "err");
+    if (String(err).includes("cancelled")) {
+      setProgress(100, "Cancelled");
+      els.progressTitle.textContent = "Cancelled";
+      setDevicePill("idle", "Cancelled");
+      logLine("Cancelled");
+      toast("<b>Cancelled</b>", "");
+    } else {
+      setProgress(100, `Error`);
+      els.progressTitle.textContent = "Failed";
+      setDevicePill("error", "Error");
+      logLine(`ERROR: ${err}`);
+      toast(`<b>Transcription failed</b> — see log for details`, "err");
+    }
     return;
   } finally {
     unlisten();
@@ -320,9 +369,10 @@ els.transcribeBtn.addEventListener("click", async () => {
 /* ---------- results ---------- */
 
 function renderStats(ev) {
-  const rtf = ev.duration_s && ev.elapsed_s
-    ? (ev.duration_s / ev.elapsed_s).toFixed(1)
-    : null;
+  const rtf =
+    ev.duration_s && ev.elapsed_s
+      ? (ev.duration_s / ev.elapsed_s).toFixed(1)
+      : null;
   const chips = [
     { label: "Duration", value: fmtDuration(ev.duration_s), cls: "" },
     { label: "Language", value: ev.language || "—", cls: "accent" },
@@ -331,7 +381,9 @@ function renderStats(ev) {
     { label: "Elapsed", value: fmtDuration(ev.elapsed_s), cls: "" },
   ];
   els.statsStrip.innerHTML = chips
-    .map((c) => `<span class="chip ${c.cls}">${c.label} <b>${c.value}</b></span>`)
+    .map(
+      (c) => `<span class="chip ${c.cls}">${c.label} <b>${c.value}</b></span>`,
+    )
     .join("");
   els.resultsFile.textContent = currentFileName || "";
   const clean = currentFileName?.replace(/\.[^.]+$/, "") || "transcript";
@@ -358,7 +410,9 @@ async function showResults(tab) {
 
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", async () => {
-    document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+    document
+      .querySelectorAll(".tab")
+      .forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     await showResults(btn.dataset.tab);
   });
@@ -367,7 +421,10 @@ document.querySelectorAll(".tab").forEach((btn) => {
 /* ---------- copy / open ---------- */
 
 async function copyText(path, label) {
-  if (!path) { toast(`<b>No ${label}</b> to copy yet`, "err"); return; }
+  if (!path) {
+    toast(`<b>No ${label}</b> to copy yet`, "err");
+    return;
+  }
   try {
     const content = await invoke("read_transcript", { path });
     await navigator.clipboard.writeText(content);
@@ -383,14 +440,18 @@ els.copyActive.addEventListener("click", async () => {
 });
 
 els.openFolder.addEventListener("click", async () => {
-  if (outputPaths.txt) await invoke("open_in_folder", { path: outputPaths.txt });
+  if (outputPaths.txt)
+    await invoke("open_in_folder", { path: outputPaths.txt });
 });
 
 /* ---------- settings persistence + device option gating ---------- */
 async function saveSettings() {
   try {
     await invoke("set_settings", {
-      settings: { device: els.deviceSelect.value, language: els.langSelect.value },
+      settings: {
+        device: els.deviceSelect.value,
+        language: els.langSelect.value,
+      },
     });
   } catch {
     /* non-fatal */
@@ -450,7 +511,10 @@ els.installGpuBtn.addEventListener("click", async () => {
     if (ev.event === "cuda_install_progress") {
       if (ev.stage === "download" && ev.total > 0) {
         const frac = Math.min(1, ev.bytes / ev.total);
-        setProgress(2 + frac * 88, `Downloading ${ev.wheel} · ${(ev.bytes / 1e6).toFixed(0)} / ${(ev.total / 1e6).toFixed(0)} MB`);
+        setProgress(
+          2 + frac * 88,
+          `Downloading ${ev.wheel} · ${(ev.bytes / 1e6).toFixed(0)} / ${(ev.total / 1e6).toFixed(0)} MB`,
+        );
         logLine(`Downloading ${ev.wheel}…`);
       } else if (ev.stage === "extract") {
         setProgress(92, `Installing ${ev.wheel}…`);
