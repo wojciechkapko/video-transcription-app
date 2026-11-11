@@ -11,7 +11,7 @@
     <main class="container">
       <header class="topbar" data-tauri-drag-region>
         <div class="brand">
-          <div class="logo">🎙️</div>
+          <img class="logo" src="assets/app-icon.svg" alt="" width="46" height="46" />
           <div class="brand-text">
             <h1>Transcribe</h1>
             <p class="subtitle">Whisper large-v3 · runs entirely on this machine</p>
@@ -59,7 +59,7 @@
         <button id="transcribe-btn" disabled>Transcribe</button>
       </section>
 
-      <!-- On-demand GPU install link (only when CUDA is missing) -->
+      <!-- On-demand GPU install link (Windows only, when CUDA is missing) -->
       <div class="gpu-note hidden" id="gpu-note">
         <span class="link" id="install-gpu-btn">⚡ Install GPU support (~1.1&nbsp;GB, one-time)</span>
       </div>

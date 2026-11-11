@@ -8,6 +8,12 @@ and a non-zero exit code.
 """
 import os, time, glob, ctypes, site, sys, json, traceback
 
+# Use the Hub's standard HTTPS downloader for this single model. The optional
+# Xet client can fail on networks where ordinary HTTPS downloads work. Set this
+# before faster_whisper imports huggingface_hub, which reads it at import time.
+# An explicit HF_HUB_DISABLE_XET=0 keeps Xet available for users who prefer it.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 # ---- CUDA DLL bootstrap (Windows) ----
 def _cuda_dir():
     """Per-user dir where on-demand NVIDIA libs are installed (writable — the
@@ -85,13 +91,24 @@ def _bootstrap_cuda():
 
 
 # Result of the CUDA bootstrap: which compute-library families actually
-# resolved (and are therefore loadable). None on non-Windows, where we don't
-# gate device selection on window-specific DLLs.
+# resolved (and are therefore loadable). Linux probes its shared libraries
+# separately when a CUDA device is visible.
 CUDA_FAMILIES_RESOLVED = _bootstrap_cuda()[0] if os.name == "nt" else None
 
 
 def emit(obj):
     print(json.dumps(obj), flush=True)
+
+
+def _linux_cuda_available():
+    """Require CUDA 12 and cuDNN 9 in the dynamic loader's search path."""
+    try:
+        for library in ("libcublasLt.so.12", "libcublas.so.12",
+                        "libcudart.so.12", "libcudnn.so.9"):
+            ctypes.CDLL(library)
+        return True
+    except OSError:
+        return False
 
 
 def choose_device():
@@ -111,6 +128,8 @@ def choose_device():
             critical = {"cublas", "cudnn", "cudart"}
             if not critical.issubset(set(CUDA_FAMILIES_RESOLVED)):
                 return "cpu"
+        elif sys.platform.startswith("linux") and not _linux_cuda_available():
+            return "cpu"
         return "cuda"
     except Exception:
         return "cpu"
@@ -147,18 +166,22 @@ def _model_dir():
 
 
 def _model_ready(d):
-    return os.path.isfile(os.path.join(d, "model.bin"))
+    # A cancelled first download can leave model.bin but not the tokenizer or
+    # vocabulary. Only load a complete model; hf_hub_download resumes the rest.
+    return all(os.path.isfile(os.path.join(d, name)) for name in MODEL_FILES)
 
 
-def _model_cached_in_hf_hub():
-    """True if large-v3 is already in the default HuggingFace cache."""
+def _hf_cached_model_dir():
+    """Return a complete cached snapshot without contacting the Hub."""
     try:
-        root = os.environ.get("HF_HOME") or os.path.join(
-            os.path.expanduser("~"), ".cache", "huggingface", "hub")
-        return os.path.isdir(
-            os.path.join(root, "models--Systran--faster-whisper-large-v3"))
+        from huggingface_hub import snapshot_download
+        # Let the Hub resolve HF_HOME/HF_HUB_CACHE and the active revision.
+        # A repo directory (or snapshot) alone may be an interrupted download.
+        cached = snapshot_download(MODEL_REPO, local_files_only=True,
+                                   allow_patterns=MODEL_FILES)
+        return cached if _model_ready(cached) else None
     except Exception:
-        return False
+        return None
 
 
 class _JsonBar:
@@ -200,6 +223,12 @@ class _JsonBar:
     def set_transfer_postfix_str(self, postfix, refresh=False):
         pass
 
+    def update_transfer(self, n=1):
+        # Recent Hub/Xet versions track network and reconstructed bytes
+        # separately. This hook keeps both on one bar; only reconstruction
+        # updates above have the model's final size as a meaningful total.
+        pass
+
     def set_postfix(self, *args, **kwargs):
         pass
 
@@ -227,9 +256,10 @@ def _load_model(device, compute_type):
         return WhisperModel(model_dir, device=device, compute_type=compute_type)
 
     # 2) Already in the default HuggingFace cache (fast path, no download).
-    if _model_cached_in_hf_hub():
+    cached = _hf_cached_model_dir()
+    if cached:
         emit(loading)
-        return WhisperModel("large-v3", device=device, compute_type=compute_type)
+        return WhisperModel(cached, device=device, compute_type=compute_type)
 
     # 3) Nothing on disk: download with progress, then load from the local dir.
     emit({"event": "downloading_model", "device": device,
@@ -404,6 +434,10 @@ def _extract_wheel(wheel_path, dest_dir):
 
 
 def _install_cuda():
+    if os.name != "nt":
+        raise RuntimeError(
+            "Automatic GPU installation is supported only on Windows. "
+            "On Linux, install CUDA 12 and cuDNN 9 separately or use CPU mode.")
     cuda_dir = _cuda_dir()
     if not cuda_dir:
         raise RuntimeError("LOCALAPPDATA not set; cannot choose an install location")

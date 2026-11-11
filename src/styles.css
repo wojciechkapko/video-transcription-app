@@ -48,12 +48,9 @@ body {
 }
 .brand { display: flex; align-items: center; gap: 12px; }
 .logo {
-  font-size: 24px;
   width: 46px; height: 46px;
-  display: grid; place-items: center;
-  background: linear-gradient(135deg, rgba(91,140,255,0.18), rgba(138,107,255,0.18));
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  display: block;
+  flex-shrink: 0;
 }
 .brand-text h1 { font-size: 17px; font-weight: 650; letter-spacing: -0.2px; }
 .subtitle { color: var(--muted); font-size: 12px; margin-top: 1px; }

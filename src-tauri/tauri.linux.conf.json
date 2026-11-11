@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "enableGTKAppId": true
+  },
+  "bundle": {
+    "resources": ["python/transcribe_worker.py"]
+  }
+}

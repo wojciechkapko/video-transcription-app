@@ -30,8 +30,12 @@ target/
 runtime/
 
 # Python
+.venv/
 __pycache__/
 *.pyc
+
+# Generated Tauri capability schemas
+src-tauri/gen/schemas/
 
 # Transcription worker temp outputs (atomic-rename leftovers)
 *.part

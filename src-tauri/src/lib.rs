@@ -17,6 +17,8 @@ fn hide_console(cmd: &mut Command) {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(not(windows))]
+    let _ = cmd;
 }
 
 struct WorkerPath(PathBuf);
@@ -45,10 +47,10 @@ struct TranscribeArgs {
 /// Resolve the Python interpreter that has `faster-whisper` installed.
 ///
 /// Priority:
-///   1. `PYTHON_TRANSCRIBE` env var (full path to a python.exe), if it exists on disk.
+///   1. `PYTHON_TRANSCRIBE` env var (path to a Python interpreter).
 ///   2. The bundled portable runtime (`resources/runtime/python.exe`).
-///   3. The author's dev venv (debug builds only, so it's inert in release).
-///   4. `python` / `py` on PATH.
+///   3. The project's `.venv`, then the Windows Hermes venv (debug builds only).
+///   4. `python3` / `python` on Unix, or `python` / `py` on Windows.
 ///
 /// On a clean install this returns an actionable error instead of a dead path.
 fn resolve_python(bundled: Option<&PathBuf>) -> Result<String, String> {
@@ -59,6 +61,7 @@ fn resolve_python(bundled: Option<&PathBuf>) -> Result<String, String> {
             if pb.is_file() {
                 return Ok(pb.to_string_lossy().into_owned());
             }
+            return Err(format!("PYTHON_TRANSCRIBE is not a file: {trimmed}"));
         }
     }
 
@@ -69,9 +72,23 @@ fn resolve_python(bundled: Option<&PathBuf>) -> Result<String, String> {
         }
     }
 
+    #[cfg(debug_assertions)]
+    {
+        let project_venv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".venv");
+        #[cfg(windows)]
+        let dev = project_venv.join("Scripts").join("python.exe");
+        #[cfg(not(windows))]
+        let dev = project_venv.join("bin").join("python");
+        if dev.is_file() {
+            return Ok(dev.to_string_lossy().into_owned());
+        }
+    }
+
     // Dev convenience (debug builds only): the Hermes venv python, resolved
     // from LOCALAPPDATA so no username or absolute path is baked into source.
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, windows))]
     {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             let dev = PathBuf::from(local)
@@ -86,14 +103,17 @@ fn resolve_python(bundled: Option<&PathBuf>) -> Result<String, String> {
         }
     }
 
-    for name in ["python", "py"] {
-        let ok = Command::new(name)
-            .arg("--version")
+    #[cfg(windows)]
+    let names = ["python", "py"];
+    #[cfg(not(windows))]
+    let names = ["python3", "python"];
+    for name in names {
+        let mut cmd = Command::new(name);
+        cmd.arg("--version")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .stderr(Stdio::null());
+        hide_console(&mut cmd);
+        let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
         if ok {
             return Ok(name.to_string());
         }
@@ -101,7 +121,8 @@ fn resolve_python(bundled: Option<&PathBuf>) -> Result<String, String> {
 
     Err(
         "No Python interpreter found. Install Python 3, run `pip install faster-whisper`, \
-         then set PYTHON_TRANSCRIBE to the full path of that python.exe"
+         in a virtual environment, then set PYTHON_TRANSCRIBE to its Python executable. \
+         On Ubuntu, run `npm run setup:ubuntu` first."
             .to_string(),
     )
 }
@@ -169,7 +190,7 @@ async fn transcribe(
         let kill_now = {
             let mut r = run2.lock().unwrap();
             r.pid = Some(child.id());
-            r.output = Some(output_prefix);
+            r.output = Some(output_prefix.clone());
             r.cancelled
         };
         if kill_now {
@@ -220,6 +241,11 @@ async fn transcribe(
             r.cancelled
         };
         if cancelled {
+            // SIGTERM on Linux is asynchronous. Clean up again after wait()
+            // so a worker cannot recreate a .part file after cancellation.
+            for ext in ["txt", "srt", "vtt"] {
+                let _ = std::fs::remove_file(format!("{output_prefix}.{ext}.part"));
+            }
             return Err("cancelled".to_string());
         }
 
@@ -325,11 +351,19 @@ async fn check_gpu(
 }
 
 #[tauri::command]
+fn can_install_cuda() -> bool {
+    cfg!(target_os = "windows")
+}
+
+#[tauri::command]
 async fn install_cuda(
     window: tauri::Window,
     state: State<'_, WorkerPath>,
     bundled: State<'_, BundledPython>,
 ) -> Result<(), String> {
+    if !can_install_cuda() {
+        return Err("Automatic GPU installation is available on Windows only.".to_string());
+    }
     let worker = state.0.clone();
     let python = resolve_python(bundled.0.as_ref())?;
     let window2 = window.clone();
@@ -400,7 +434,16 @@ fn open_in_folder(path: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let file = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        let parent = file.parent().ok_or("file has no parent directory")?;
+        Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| format!("Could not open the folder with xdg-open: {e}"))?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = path;
     }
@@ -421,9 +464,12 @@ fn default_auto() -> String {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    let base = std::env::var("LOCALAPPDATA")
-        .ok()
+    #[cfg(windows)]
+    let base = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
         .or_else(|| {
             std::env::var("HOME")
                 .ok()
@@ -466,10 +512,13 @@ pub fn run() {
             let resource_dir = app.path().resource_dir().ok();
 
             // Bundled portable runtime (the self-contained CPU build), if present.
+            #[cfg(windows)]
             let runtime_python = resource_dir
                 .as_ref()
                 .map(|d| d.join("runtime").join("python.exe"))
                 .filter(|p| p.is_file());
+            #[cfg(not(windows))]
+            let runtime_python = None;
 
             // Resolve the worker at runtime: bundled resource first, then the
             // source tree (covers `tauri dev`), then an explicit override.
@@ -503,6 +552,7 @@ pub fn run() {
             transcribe,
             cancel_transcribe,
             check_gpu,
+            can_install_cuda,
             install_cuda,
             get_settings,
             set_settings,

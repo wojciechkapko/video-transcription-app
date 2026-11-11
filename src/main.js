@@ -8,6 +8,7 @@ let currentFileName = null;
 let outputPaths = { txt: null, srt: null, vtt: null };
 let busy = false;
 let installing = false;
+let canInstallCuda = false;
 let mediaDuration = 0; // set from worker events; drives the progress bar
 let currentDevice = null; // "cuda" | "cpu" | null
 let lastFrac = 0; // last media fraction for ETA
@@ -432,8 +433,12 @@ els.copyActive.addEventListener("click", async () => {
 });
 
 els.openFolder.addEventListener("click", async () => {
-  if (outputPaths.txt)
+  if (!outputPaths.txt) return;
+  try {
     await invoke("open_in_folder", { path: outputPaths.txt });
+  } catch {
+    toast("<b>Could not open folder</b> — open the output directory manually", "err");
+  }
 });
 
 /* ---------- settings persistence + device option gating ---------- */
@@ -463,16 +468,17 @@ async function updateGpuOption(cuda) {
     gpuOption.disabled = true;
     gpuOption.textContent = "GPU (CUDA — not available)";
   }
-  els.gpuNote.classList.toggle("hidden", cuda);
+  els.gpuNote.classList.toggle("hidden", cuda || !canInstallCuda);
 }
 
 async function initDeviceOptions() {
-  let cuda = false;
-  try {
-    cuda = await invoke("check_gpu");
-  } catch {
-    // Probe failed: leave "GPU" selectable; Auto still falls back to CPU safely.
-  }
+  // Only offer the installer when the backend confirms platform support.
+  // A failed support lookup keeps the installer hidden; Auto stays available.
+  const [cuda, installSupported] = await Promise.all([
+    invoke("check_gpu").catch(() => false),
+    invoke("can_install_cuda").catch(() => false),
+  ]);
+  canInstallCuda = installSupported === true;
   await updateGpuOption(cuda);
 
   // Restore last-selected device + language (defaults to "auto" on first run).
@@ -493,7 +499,7 @@ initDeviceOptions();
 let installUnlisten = null;
 
 els.installGpuBtn.addEventListener("click", async () => {
-  if (installUnlisten || busy || installing) return;
+  if (!canInstallCuda || installUnlisten || busy || installing) return;
   installing = true;
   els.transcribeBtn.disabled = true;
   els.langSelect.disabled = true;

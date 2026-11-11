@@ -13,6 +13,15 @@
 # (worker --install-cuda) or point at their own env via PYTHON_TRANSCRIBE.
 set -euo pipefail
 
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) ;;
+  *)
+    echo "This script builds the Windows Python runtime and must run on Windows (Git Bash/MSYS2)." >&2
+    echo "On Ubuntu, use: npm run setup:ubuntu" >&2
+    exit 1
+    ;;
+esac
+
 PY_VER="3.11.9"
 PY_VER_SHORT="311"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
